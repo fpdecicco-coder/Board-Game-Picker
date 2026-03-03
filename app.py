@@ -109,8 +109,12 @@ def load_recently_played() -> pd.DataFrame:
 
 def save_recently_played(rp: pd.DataFrame) -> None:
     rp_out = rp.copy()
-    rp_out["objectid"] = rp_out["objectid"].astype(int)
-    rp_out["last_played"] = rp_out["last_played"].astype(str)
+    if rp_out.empty:
+        # keep headers
+        rp_out = pd.DataFrame(columns=["objectid", "last_played"])
+    else:
+        rp_out["objectid"] = rp_out["objectid"].astype(int)
+        rp_out["last_played"] = rp_out["last_played"].astype(str)
     rp_out.to_csv(RECENT_PATH, index=False)
 
 
@@ -137,6 +141,15 @@ def mark_played(objectid: int, played_date: date | None = None) -> None:
     save_recently_played(rp)
 
 
+def clear_played(oid: int) -> None:
+    """Remove any last_played record for this game (undo)."""
+    rp = load_recently_played()
+    if rp.empty:
+        return
+    rp = rp[rp["objectid"].astype(int) != int(oid)].copy()
+    save_recently_played(rp)
+
+
 def days_ago(d):
     if pd.isna(d):
         return pd.NA
@@ -145,22 +158,6 @@ def days_ago(d):
         return (date.today() - dd).days
     except Exception:
         return pd.NA
-
-
-# ---------------------------
-# Weight coloring
-# ---------------------------
-def weight_color(val):
-    try:
-        x = float(val)
-    except Exception:
-        return ""
-    x = max(1.0, min(5.0, x))
-    t = (x - 1.0) / 4.0
-    r = int(40 + (220 - 40) * t)
-    g = int(170 + (60 - 170) * t)
-    b = 80
-    return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 700;"
 
 
 # ---------------------------
@@ -178,8 +175,9 @@ DEFAULTS = {
     "confirm_played_pick": False,
     "sort_display": "BBG Score",
     # table confirmation
-    "pending_play_oid": None,
-    "pending_play_name": None,
+    "pending_action": None,   # "mark" or "unmark"
+    "pending_oid": None,
+    "pending_name": None,
 }
 
 for k, v in DEFAULTS.items():
@@ -187,18 +185,16 @@ for k, v in DEFAULTS.items():
         st.session_state[k] = v
 
 
-def reset_filters():
-    for k, v in DEFAULTS.items():
-        st.session_state[k] = v
-    # also reset the editor widget state
-    if "games_editor" in st.session_state:
-        del st.session_state["games_editor"]
-    st.rerun()
-
-
 def clear_editor_state():
     if "games_editor" in st.session_state:
         del st.session_state["games_editor"]
+
+
+def reset_filters():
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+    clear_editor_state()
+    st.rerun()
 
 
 # ---------------------------
@@ -217,10 +213,18 @@ with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
     st.slider("How many players tonight?", 1, 10, key="players")
-    st.text_input("Search games", placeholder="e.g., Concordia, Scythe, Wingspan…", key="search")
+    st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
     st.toggle("Hide expansions", key="hide_expansions")
+
     st.toggle("Avoid recently played in Random", key="avoid_recent")
-    st.slider("Avoid window (days)", 1, 120, key="avoid_days")
+
+    # ✅ DISABLE this when avoid_recent is OFF
+    st.slider(
+        "Avoid window (days)",
+        1, 120,
+        key="avoid_days",
+        disabled=not st.session_state["avoid_recent"]
+    )
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -341,7 +345,7 @@ with left:
             st.checkbox("Confirm we played this game tonight", key="confirm_played_pick")
 
             if st.button(
-                "✅ Mark as Played Tonight (Pick)",
+                "✅ Mark as Played Today (Pick)",
                 use_container_width=True,
                 disabled=not st.session_state["confirm_played_pick"],
             ):
@@ -351,50 +355,62 @@ with left:
                 st.rerun()
 
 # ---------------------------
-# Confirmation dialog for table checkbox
+# Confirm dialog for table checkbox actions
 # ---------------------------
-def open_pending_dialog():
-    oid = st.session_state["pending_play_oid"]
-    name = st.session_state["pending_play_name"]
-    if oid is None:
+def show_pending_dialog():
+    action = st.session_state["pending_action"]
+    oid = st.session_state["pending_oid"]
+    name = st.session_state["pending_name"]
+    if oid is None or name is None or action is None:
         return
 
-    # Preferred: modal dialog
+    title = "Confirm played today" if action == "mark" else "Undo played today"
+    prompt = f"Confirm you played **{name}** today?" if action == "mark" else f"Remove **{name}** from *played today*?"
+
     if hasattr(st, "dialog"):
-        @st.dialog("Confirm played today")
+        @st.dialog(title)
         def _dlg():
-            st.write(f"Confirm you played **{name}** today?")
+            st.write(prompt)
             c1, c2 = st.columns(2)
             with c1:
                 if st.button("✅ Confirm", use_container_width=True):
-                    mark_played(int(oid), date.today())
-                    st.session_state["pending_play_oid"] = None
-                    st.session_state["pending_play_name"] = None
+                    if action == "mark":
+                        mark_played(int(oid), date.today())
+                    else:
+                        clear_played(int(oid))
+                    st.session_state["pending_action"] = None
+                    st.session_state["pending_oid"] = None
+                    st.session_state["pending_name"] = None
                     clear_editor_state()
                     st.rerun()
             with c2:
                 if st.button("Cancel", use_container_width=True):
-                    st.session_state["pending_play_oid"] = None
-                    st.session_state["pending_play_name"] = None
-                    clear_editor_state()  # resets checkbox back
+                    st.session_state["pending_action"] = None
+                    st.session_state["pending_oid"] = None
+                    st.session_state["pending_name"] = None
+                    clear_editor_state()
                     st.rerun()
 
         _dlg()
     else:
-        # Fallback if dialogs aren't supported
-        st.warning(f"Confirm you played **{name}** today?")
+        st.warning(prompt)
         c1, c2 = st.columns(2)
         with c1:
             if st.button("✅ Confirm"):
-                mark_played(int(oid), date.today())
-                st.session_state["pending_play_oid"] = None
-                st.session_state["pending_play_name"] = None
+                if action == "mark":
+                    mark_played(int(oid), date.today())
+                else:
+                    clear_played(int(oid))
+                st.session_state["pending_action"] = None
+                st.session_state["pending_oid"] = None
+                st.session_state["pending_name"] = None
                 clear_editor_state()
                 st.rerun()
         with c2:
             if st.button("Cancel"):
-                st.session_state["pending_play_oid"] = None
-                st.session_state["pending_play_name"] = None
+                st.session_state["pending_action"] = None
+                st.session_state["pending_oid"] = None
+                st.session_state["pending_name"] = None
                 clear_editor_state()
                 st.rerun()
 
@@ -428,9 +444,8 @@ with right:
 
     extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
     st.write(f"### {len(table_df)} games available for {players} players{extra}")
-    st.caption("Check ✅ Played Tonight to log a game (you’ll be asked to confirm).")
+    st.caption("Toggle ✅ Played Tonight (you’ll be asked to confirm). Uncheck to undo.")
 
-    # Build editor table
     editor_df = pd.DataFrame({
         "Played Tonight": table_df["last_played"].apply(lambda d: (not pd.isna(d)) and (d == date.today())),
         "Game": table_df["objectname"],
@@ -445,15 +460,17 @@ with right:
         "Last Played": table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""}),
         "Days Ago": table_df["days_ago"],
         "🔗": table_df["bgg_url"],
-        "_oid": table_df["objectid"],  # hidden helper
+        "_oid": table_df["objectid"],
     })
 
-    # Baseline to detect new checks
     baseline_key = "played_baseline_by_oid"
     if baseline_key not in st.session_state:
         st.session_state[baseline_key] = {
             int(oid): bool(val)
-            for oid, val in zip(editor_df["_oid"].fillna(-1).astype(int).tolist(), editor_df["Played Tonight"].tolist())
+            for oid, val in zip(
+                editor_df["_oid"].fillna(-1).astype(int).tolist(),
+                editor_df["Played Tonight"].tolist()
+            )
             if oid != -1
         }
 
@@ -469,36 +486,52 @@ with right:
         },
     )
 
-    # Detect new checks (False -> True), then open confirmation dialog
+    # Detect transitions in the edited checkbox:
+    # - False -> True => ask to confirm mark
+    # - True -> False (only relevant if it was actually played today) => ask to confirm undo
     baseline_map = st.session_state[baseline_key]
-    newly_checked = None
+    pending = None  # (action, oid, name)
 
-    for played_now, oid, name in zip(edited["Played Tonight"].tolist(), editor_df["_oid"].tolist(), editor_df["Game"].tolist()):
+    for played_now, oid, name, played_today_truth in zip(
+        edited["Played Tonight"].tolist(),
+        editor_df["_oid"].tolist(),
+        editor_df["Game"].tolist(),
+        editor_df["Played Tonight"].tolist(),  # truth as of last refresh
+    ):
         if pd.isna(oid):
             continue
         oid = int(oid)
         was = bool(baseline_map.get(oid, False))
         now = bool(played_now)
+
+        # mark request
         if now and not was:
-            newly_checked = (oid, name)
+            pending = ("mark", oid, name)
             break
 
-    # If a new check happened, store pending + reset editor state so checkbox doesn't "stick" pre-confirm
-    if newly_checked and st.session_state["pending_play_oid"] is None:
-        oid, name = newly_checked
-        st.session_state["pending_play_oid"] = oid
-        st.session_state["pending_play_name"] = name
-        clear_editor_state()
+        # undo request (only if it was truly played today in saved data)
+        if (not now) and was and bool(played_today_truth):
+            pending = ("unmark", oid, name)
+            break
+
+    if pending and st.session_state["pending_oid"] is None:
+        action, oid, name = pending
+        st.session_state["pending_action"] = action
+        st.session_state["pending_oid"] = oid
+        st.session_state["pending_name"] = name
+        clear_editor_state()  # revert checkbox until confirmed
         st.rerun()
 
-    # Open dialog if pending
-    if st.session_state["pending_play_oid"] is not None:
-        open_pending_dialog()
+    # Show dialog if pending
+    if st.session_state["pending_oid"] is not None:
+        show_pending_dialog()
 
-    # Update baseline map to current *saved* truth (not the edited state)
-    # This keeps detection clean across reruns.
+    # Update baseline to current saved truth (not the edited view)
     st.session_state[baseline_key] = {
         int(oid): bool(val)
-        for oid, val in zip(editor_df["_oid"].fillna(-1).astype(int).tolist(), editor_df["Played Tonight"].tolist())
+        for oid, val in zip(
+            editor_df["_oid"].fillna(-1).astype(int).tolist(),
+            editor_df["Played Tonight"].tolist()
+        )
         if oid != -1
     }
