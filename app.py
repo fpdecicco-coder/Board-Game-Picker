@@ -26,16 +26,21 @@ filtered = df[
     (df["maxplayers"] >= players)
 ].copy()
 
-sort_option = st.selectbox(
+sort_display = st.selectbox(
     "Sort by",
-    {
-        "BGG Score": "baverage",
-        "Weight": "avgweight",
-        "Game Name": "objectname"
-    }
+    ["BGG Score", "Weight", "Game Name"]
 )
 
-filtered = filtered.sort_values(by=sort_option, ascending=False)
+if sort_display == "BGG Score":
+    sort_column = "baverage"
+elif sort_display == "Weight":
+    sort_column = "avgweight"
+else:
+    sort_column = "objectname"
+
+filtered = filtered.sort_values(by=sort_column, ascending=False)
+
+
 
 st.write(f"### {len(filtered)} Games Available")
 
