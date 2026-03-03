@@ -8,6 +8,7 @@ import streamlit as st
 st.set_page_config(page_title="Board Game Picker", layout="wide")
 
 RECENT_PATH = Path("recently_played.csv")
+HEAVY_CUTOFF = 3.25  # fixed threshold
 
 # ---------------------------
 # Styling
@@ -102,8 +103,7 @@ def load_recently_played() -> pd.DataFrame:
             rp["objectid"] = pd.to_numeric(rp["objectid"], errors="coerce")
         if "last_played" in rp.columns:
             rp["last_played"] = pd.to_datetime(rp["last_played"], errors="coerce").dt.date
-        rp = rp.dropna(subset=["objectid"]).copy()
-        return rp
+        return rp.dropna(subset=["objectid"]).copy()
     return pd.DataFrame(columns=["objectid", "last_played"])
 
 
@@ -154,15 +154,14 @@ def days_ago(d):
 DEFAULTS = {
     "players": 4,
     "hide_expansions": True,
-    "sort_display": "BBG Score",
     "heavy_mode": False,
-    "heavy_cutoff": 3.25,
     "search": "",
     "random_pick_id": None,
     "trigger_random": False,
     "avoid_recent": True,
     "avoid_days": 14,
-    "confirm_played": False,
+    "confirm_played_pick": False,
+    "sort_display": "BBG Score",
 }
 
 for k, v in DEFAULTS.items():
@@ -194,49 +193,38 @@ with left:
     st.slider("How many players tonight?", 1, 10, key="players")
     st.text_input("Search games", placeholder="e.g., Concordia, Scythe, Wingspan…", key="search")
     st.toggle("Hide expansions", key="hide_expansions")
-    st.selectbox("Sort by", ["BBG Score", "Weight", "Game Name"], key="sort_display")
+    st.toggle("Avoid recently played in Random", key="avoid_recent")
+    st.slider("Avoid window (days)", 1, 120, key="avoid_days")
 
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
             st.session_state["random_pick_id"] = None
             st.session_state["trigger_random"] = True
-            st.session_state["confirm_played"] = False
+            st.session_state["confirm_played_pick"] = False
     with c2:
         if st.button("🔥 Heavy", use_container_width=True):
             st.session_state["heavy_mode"] = not st.session_state["heavy_mode"]
             st.session_state["random_pick_id"] = None
-            st.session_state["confirm_played"] = False
+            st.session_state["confirm_played_pick"] = False
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # Heavy status badge + cutoff
+    # Heavy status badge (fixed threshold)
     if st.session_state["heavy_mode"]:
         st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
     else:
         st.markdown('<span class="badge badge-off">HEAVY MODE: OFF</span>', unsafe_allow_html=True)
 
-    st.slider(
-        "Heavy cutoff (Weight ≥)",
-        min_value=1.00,
-        max_value=5.00,
-        step=0.05,
-        key="heavy_cutoff",
-    )
     st.markdown(
-        f'<div class="mini">Heavy Mode filters to games with <b>Weight ≥ {st.session_state["heavy_cutoff"]:.2f}</b>.</div>',
+        f'<div class="mini">Heavy Mode filters to games with <b>Weight ≥ {HEAVY_CUTOFF:.2f}</b>.</div>',
         unsafe_allow_html=True,
     )
-
-    st.markdown("---")
-    st.toggle("Avoid recently played in Random", key="avoid_recent")
-    st.slider("Avoid window (days)", 1, 120, key="avoid_days")
-    st.caption("Only affects Random picks. A game is only marked as played when you confirm it.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------
-# Filtering (RIGHT + used for Random pool too)
+# Filtering
 # ---------------------------
 filtered = df.copy()
 
@@ -255,10 +243,9 @@ q = (st.session_state["search"] or "").strip()
 if q:
     filtered = filtered[filtered["objectname"].astype(str).str.contains(q, case=False, na=False)]
 
-# Heavy mode filter
+# Heavy mode filter (fixed)
 if st.session_state["heavy_mode"] and "avgweight" in filtered.columns:
-    cutoff = float(st.session_state["heavy_cutoff"])
-    filtered = filtered[filtered["avgweight"].notna() & (filtered["avgweight"] >= cutoff)]
+    filtered = filtered[filtered["avgweight"].notna() & (filtered["avgweight"] >= HEAVY_CUTOFF)]
 
 # Merge recently played
 rp = load_recently_played()
@@ -269,18 +256,10 @@ else:
 
 filtered["days_ago"] = filtered["last_played"].apply(days_ago)
 
-# Sorting (table view)
-sd = st.session_state["sort_display"]
-if sd == "BBG Score":
-    filtered = filtered.sort_values("baverage", ascending=False, na_position="last")
-elif sd == "Weight":
-    filtered = filtered.sort_values("avgweight", ascending=False, na_position="last")
-else:
-    filtered = filtered.sort_values("objectname", ascending=True, na_position="last")
-
 # Round numbers
 filtered["avgweight"] = filtered["avgweight"].round(2)
 filtered["baverage"] = filtered["baverage"].round(2)
+
 filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
@@ -288,12 +267,10 @@ filtered = filtered.reset_index(drop=True)
 # ---------------------------
 if st.session_state["trigger_random"]:
     st.session_state["trigger_random"] = False
-
     pool = filtered.copy()
 
     if st.session_state["avoid_recent"]:
         window = int(st.session_state["avoid_days"])
-        # Exclude games played within the last N days
         pool = pool[(pool["days_ago"].isna()) | (pool["days_ago"] >= window)]
 
     if len(pool) > 0 and "objectid" in pool.columns:
@@ -302,7 +279,7 @@ if st.session_state["trigger_random"]:
         st.session_state["random_pick_id"] = None
 
 # ---------------------------
-# Show Random Pick under controls (LEFT) + confirm-to-mark-played
+# Random Pick card (LEFT) + confirm-to-mark-played
 # ---------------------------
 with left:
     if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
@@ -339,17 +316,16 @@ with left:
                 unsafe_allow_html=True,
             )
 
-            # Confirmation gate
-            st.checkbox("Confirm we played this game tonight", key="confirm_played")
+            st.checkbox("Confirm we played this game tonight", key="confirm_played_pick")
 
             if st.button(
-                "✅ Mark as Played Tonight",
+                "✅ Mark as Played Tonight (Pick)",
                 use_container_width=True,
-                disabled=not st.session_state["confirm_played"],
+                disabled=not st.session_state["confirm_played_pick"],
             ):
                 mark_played(int(row["objectid"]), date.today())
-                st.session_state["confirm_played"] = False
-                st.success("Game marked as played!")
+                st.session_state["confirm_played_pick"] = False
+                st.success("Saved!")
                 st.rerun()
         else:
             st.info("Your random pick isn’t in the filtered list anymore. Try Random again.")
@@ -370,43 +346,91 @@ def weight_color(val):
     return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 700;"
 
 # ---------------------------
-# Display table (RIGHT)
+# Table + Sort By (RIGHT)
 # ---------------------------
 with right:
-    extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
-    st.write(f"### {len(filtered)} games available for {players} players{extra}")
+    # Sort selector moved here (right above table)
+    st.session_state["sort_display"] = st.selectbox(
+        "Sort by",
+        ["BBG Score", "Weight", "Game Name", "Last Played (Oldest)", "Last Played (Newest)"],
+        index=["BBG Score", "Weight", "Game Name", "Last Played (Oldest)", "Last Played (Newest)"].index(
+            st.session_state.get("sort_display", "BBG Score")
+        ),
+    )
 
+    sort_choice = st.session_state["sort_display"]
+    table_df = filtered.copy()
+
+    if sort_choice == "BBG Score":
+        table_df = table_df.sort_values("baverage", ascending=False, na_position="last")
+    elif sort_choice == "Weight":
+        table_df = table_df.sort_values("avgweight", ascending=False, na_position="last")
+    elif sort_choice == "Game Name":
+        table_df = table_df.sort_values("objectname", ascending=True, na_position="last")
+    elif sort_choice == "Last Played (Newest)":
+        table_df = table_df.sort_values("last_played", ascending=False, na_position="last")
+    else:  # oldest
+        table_df = table_df.sort_values("last_played", ascending=True, na_position="last")
+
+    table_df = table_df.reset_index(drop=True)
+
+    extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
+    st.write(f"### {len(table_df)} games available for {players} players{extra}")
+
+    # ---- "Played Tonight" checkbox column handling ----
+    # We create a checkbox per row using Streamlit keys. If checked, we mark played today.
+    st.caption("Tip: Check ✅ Played Tonight to log a game as played today.")
+
+    # Build display frame (we render checkboxes separately on the left of the table)
     display = pd.DataFrame()
-    display["Game"] = filtered["objectname"]
-    display["Players"] = filtered.apply(
+    display["Game"] = table_df["objectname"]
+    display["Players"] = table_df.apply(
         lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
         if pd.notna(r["maxplayers"])
         else f"{int(r['minplayers'])}+",
         axis=1
     )
-    display["Weight"] = filtered["avgweight"]
-    display["BBG Score"] = filtered["baverage"]
+    display["Weight"] = table_df["avgweight"]
+    display["BBG Score"] = table_df["baverage"]
+    display["Last Played"] = table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""})
+    display["Days Ago"] = table_df["days_ago"]
+    display["🔗"] = table_df["bgg_url"]
 
-    # Recently played columns (populated only when you click Mark as Played Tonight)
-    display["Last Played"] = filtered["last_played"].astype(str).replace({"<NA>": "", "nan": ""})
-    display["Days Ago"] = filtered["days_ago"]
+    # Layout: checkboxes column + dataframe
+    cb_col, table_col = st.columns([0.22, 0.78], gap="small")
 
-    display["🔗"] = filtered["bgg_url"]
+    with cb_col:
+        st.write("**Played**")
+        for i, row in table_df.iterrows():
+            oid = int(row["objectid"]) if pd.notna(row["objectid"]) else None
+            if oid is None:
+                st.write("")
+                continue
 
-    styled = display.style.applymap(weight_color, subset=["Weight"]).format(
-        {
-            "Weight": "{:.2f}",
-            "BBG Score": "{:.2f}",
-            "Days Ago": "{:,.0f}",
-        },
-        na_rep="",
-    )
+            # If already played today, default checked (visual only)
+            already_today = (not pd.isna(row["last_played"])) and (row["last_played"] == date.today())
 
-    st.dataframe(
-        styled,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "🔗": st.column_config.LinkColumn("BGG", display_text="🔗"),
-        },
-    )
+            key = f"played_{oid}"
+            if key not in st.session_state:
+                st.session_state[key] = bool(already_today)
+
+            checked = st.checkbox("", key=key)
+
+            # If user checks it (and it wasn't already today), mark played
+            if checked and not already_today:
+                mark_played(oid, date.today())
+                st.toast(f"Saved: {row['objectname']} played today ✅")
+                st.rerun()
+
+    with table_col:
+        styled = display.style.applymap(weight_color, subset=["Weight"]).format(
+            {"Weight": "{:.2f}", "BBG Score": "{:.2f}", "Days Ago": "{:,.0f}"},
+            na_rep="",
+        )
+
+        st.dataframe(
+            styled,
+            use_container_width=True,
+            hide_index=True,
+            column_config={"🔗": st.column_config.LinkColumn("BGG", display_text="🔗")},
+        )
