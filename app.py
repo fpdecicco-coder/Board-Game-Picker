@@ -134,7 +134,6 @@ def mark_played(objectid: int, played_date: date | None = None) -> None:
     rp = rp.dropna(subset=["objectid", "last_played"])
     rp = rp.drop_duplicates(subset=["objectid"], keep="last")
     rp = rp.sort_values("last_played", ascending=False)
-
     save_recently_played(rp)
 
 
@@ -146,6 +145,22 @@ def days_ago(d):
         return (date.today() - dd).days
     except Exception:
         return pd.NA
+
+
+# ---------------------------
+# Weight coloring
+# ---------------------------
+def weight_color(val):
+    try:
+        x = float(val)
+    except Exception:
+        return ""
+    x = max(1.0, min(5.0, x))
+    t = (x - 1.0) / 4.0
+    r = int(40 + (220 - 40) * t)
+    g = int(170 + (60 - 170) * t)
+    b = 80
+    return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 700;"
 
 
 # ---------------------------
@@ -185,7 +200,7 @@ df = load_collection()
 left, right = st.columns([1, 3], gap="large")
 
 # ---------------------------
-# Controls (LEFT)
+# LEFT controls
 # ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -210,7 +225,6 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # Heavy status badge (fixed threshold)
     if st.session_state["heavy_mode"]:
         st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
     else:
@@ -238,12 +252,10 @@ filtered = filtered[
     & ((filtered["maxplayers"].isna()) | (filtered["maxplayers"] >= players))
 ]
 
-# Search filter
 q = (st.session_state["search"] or "").strip()
 if q:
     filtered = filtered[filtered["objectname"].astype(str).str.contains(q, case=False, na=False)]
 
-# Heavy mode filter (fixed)
 if st.session_state["heavy_mode"] and "avgweight" in filtered.columns:
     filtered = filtered[filtered["avgweight"].notna() & (filtered["avgweight"] >= HEAVY_CUTOFF)]
 
@@ -256,14 +268,13 @@ else:
 
 filtered["days_ago"] = filtered["last_played"].apply(days_ago)
 
-# Round numbers
+# Round for display
 filtered["avgweight"] = filtered["avgweight"].round(2)
 filtered["baverage"] = filtered["baverage"].round(2)
-
 filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
-# Random pick selection (AFTER filtering + avoid recent option)
+# Random pick selection (after filtering + avoid recent)
 # ---------------------------
 if st.session_state["trigger_random"]:
     st.session_state["trigger_random"] = False
@@ -279,7 +290,7 @@ if st.session_state["trigger_random"]:
         st.session_state["random_pick_id"] = None
 
 # ---------------------------
-# Random Pick card (LEFT) + confirm-to-mark-played
+# Random pick card (LEFT) + confirmation mark
 # ---------------------------
 with left:
     if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
@@ -327,39 +338,21 @@ with left:
                 st.session_state["confirm_played_pick"] = False
                 st.success("Saved!")
                 st.rerun()
-        else:
-            st.info("Your random pick isn’t in the filtered list anymore. Try Random again.")
 
 # ---------------------------
-# Weight coloring
-# ---------------------------
-def weight_color(val):
-    try:
-        x = float(val)
-    except Exception:
-        return ""
-    x = max(1.0, min(5.0, x))
-    t = (x - 1.0) / 4.0
-    r = int(40 + (220 - 40) * t)
-    g = int(170 + (60 - 170) * t)
-    b = 80
-    return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 700;"
-
-# ---------------------------
-# Table + Sort By (RIGHT)
+# RIGHT panel: Sort + table with in-table checkboxes
 # ---------------------------
 with right:
-    # Sort selector moved here (right above table)
     st.session_state["sort_display"] = st.selectbox(
         "Sort by",
-        ["BBG Score", "Weight", "Game Name", "Last Played (Oldest)", "Last Played (Newest)"],
-        index=["BBG Score", "Weight", "Game Name", "Last Played (Oldest)", "Last Played (Newest)"].index(
+        ["BBG Score", "Weight", "Game Name", "Last Played (Newest)", "Last Played (Oldest)"],
+        index=["BBG Score", "Weight", "Game Name", "Last Played (Newest)", "Last Played (Oldest)"].index(
             st.session_state.get("sort_display", "BBG Score")
         ),
     )
 
-    sort_choice = st.session_state["sort_display"]
     table_df = filtered.copy()
+    sort_choice = st.session_state["sort_display"]
 
     if sort_choice == "BBG Score":
         table_df = table_df.sort_values("baverage", ascending=False, na_position="last")
@@ -369,68 +362,76 @@ with right:
         table_df = table_df.sort_values("objectname", ascending=True, na_position="last")
     elif sort_choice == "Last Played (Newest)":
         table_df = table_df.sort_values("last_played", ascending=False, na_position="last")
-    else:  # oldest
+    else:
         table_df = table_df.sort_values("last_played", ascending=True, na_position="last")
 
     table_df = table_df.reset_index(drop=True)
 
     extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
     st.write(f"### {len(table_df)} games available for {players} players{extra}")
+    st.caption("Use ✅ Played Tonight to log any game as played today.")
 
-    # ---- "Played Tonight" checkbox column handling ----
-    # We create a checkbox per row using Streamlit keys. If checked, we mark played today.
-    st.caption("Tip: Check ✅ Played Tonight to log a game as played today.")
+    # Build editor table (checkbox INSIDE table)
+    editor_df = pd.DataFrame({
+        "Played Tonight": table_df["last_played"].apply(lambda d: (not pd.isna(d)) and (d == date.today())),
+        "Game": table_df["objectname"],
+        "Players": table_df.apply(
+            lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
+            if pd.notna(r["maxplayers"])
+            else f"{int(r['minplayers'])}+",
+            axis=1
+        ),
+        "Weight": table_df["avgweight"],
+        "BBG Score": table_df["baverage"],
+        "Last Played": table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""}),
+        "Days Ago": table_df["days_ago"],
+        "🔗": table_df["bgg_url"],
+        "_oid": table_df["objectid"],  # hidden helper
+    })
 
-    # Build display frame (we render checkboxes separately on the left of the table)
-    display = pd.DataFrame()
-    display["Game"] = table_df["objectname"]
-    display["Players"] = table_df.apply(
-        lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
-        if pd.notna(r["maxplayers"])
-        else f"{int(r['minplayers'])}+",
-        axis=1
+    # Keep a baseline so we can detect NEW checks
+    baseline_key = "played_baseline"
+    if baseline_key not in st.session_state:
+        st.session_state[baseline_key] = editor_df[["Played Tonight", "_oid"]].copy()
+
+    edited = st.data_editor(
+        editor_df.drop(columns=["_oid"]),
+        key="games_editor",
+        use_container_width=True,
+        hide_index=True,
+        disabled=["Game", "Players", "Weight", "BBG Score", "Last Played", "Days Ago", "🔗"],
+        column_config={
+            "Played Tonight": st.column_config.CheckboxColumn("Played Tonight"),
+            "🔗": st.column_config.LinkColumn("BGG", display_text="🔗"),
+        },
     )
-    display["Weight"] = table_df["avgweight"]
-    display["BBG Score"] = table_df["baverage"]
-    display["Last Played"] = table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""})
-    display["Days Ago"] = table_df["days_ago"]
-    display["🔗"] = table_df["bgg_url"]
 
-    # Layout: checkboxes column + dataframe
-    cb_col, table_col = st.columns([0.22, 0.78], gap="small")
+    # Detect new "Played Tonight" checks (only transitions False -> True)
+    baseline = st.session_state[baseline_key].copy()
+    current_played = pd.Series(edited["Played Tonight"].values)
+    oids = editor_df["_oid"].values
 
-    with cb_col:
-        st.write("**Played**")
-        for i, row in table_df.iterrows():
-            oid = int(row["objectid"]) if pd.notna(row["objectid"]) else None
-            if oid is None:
-                st.write("")
-                continue
+    # baseline mapping by oid for stability
+    baseline_map = {int(r["_oid"]): bool(r["Played Tonight"]) for _, r in baseline.iterrows() if pd.notna(r["_oid"])}
 
-            # If already played today, default checked (visual only)
-            already_today = (not pd.isna(row["last_played"])) and (row["last_played"] == date.today())
+    newly_checked_oids = []
+    for played_now, oid in zip(current_played, oids):
+        if pd.isna(oid):
+            continue
+        oid = int(oid)
+        was = baseline_map.get(oid, False)
+        now = bool(played_now)
+        if now and not was:
+            newly_checked_oids.append(oid)
 
-            key = f"played_{oid}"
-            if key not in st.session_state:
-                st.session_state[key] = bool(already_today)
+    if newly_checked_oids:
+        for oid in newly_checked_oids:
+            mark_played(oid, date.today())
+        st.toast(f"Saved {len(newly_checked_oids)} game(s) as played today ✅")
 
-            checked = st.checkbox("", key=key)
+        # Reset baseline after save and refresh
+        st.session_state[baseline_key] = editor_df[["Played Tonight", "_oid"]].copy()
+        st.rerun()
 
-            # If user checks it (and it wasn't already today), mark played
-            if checked and not already_today:
-                mark_played(oid, date.today())
-                st.toast(f"Saved: {row['objectname']} played today ✅")
-                st.rerun()
-
-    with table_col:
-        styled = display.style.applymap(weight_color, subset=["Weight"]).format(
-            {"Weight": "{:.2f}", "BBG Score": "{:.2f}", "Days Ago": "{:,.0f}"},
-            na_rep="",
-        )
-
-        st.dataframe(
-            styled,
-            use_container_width=True,
-            hide_index=True,
-            column_config={"🔗": st.column_config.LinkColumn("BGG", display_text="🔗")},
-        )
+    # Always update baseline to current view so scrolling/sorting doesn't confuse it
+    st.session_state[baseline_key] = pd.DataFrame({"Played Tonight": edited["Played Tonight"], "_oid": oids})
