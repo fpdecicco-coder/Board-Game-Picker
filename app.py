@@ -1,12 +1,16 @@
 import random
+import time
 import pandas as pd
+import requests
 import streamlit as st
+import xml.etree.ElementTree as ET
+from pathlib import Path
 
-# ---------------------------
-# Page + light styling
-# ---------------------------
 st.set_page_config(page_title="KSGS Board Game Picker", layout="wide")
 
+# ---------------------------
+# Styling
+# ---------------------------
 st.markdown(
     """
     <style>
@@ -17,118 +21,198 @@ st.markdown(
         border: 1px solid rgba(0,0,0,0.08);
         border-radius: 14px;
         padding: 14px 16px;
-        background: rgba(255,255,255,0.75);
-        box-shadow: 0 1px 6px rgba(0,0,0,0.04);
+        background: rgba(255,255,255,0.85);
+        box-shadow: 0 1px 6px rgba(0,0,0,0.05);
         margin-bottom: 12px;
-      }
-      .pill {
-        display:inline-block;
-        padding: 4px 10px;
-        border-radius: 999px;
-        border: 1px solid rgba(0,0,0,0.10);
-        margin-right: 6px;
-        font-size: 0.9rem;
       }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
+CATS_CACHE_PATH = Path("bgg_categories_cache.csv")
+
 # ---------------------------
-# Load + clean data
+# BGG helpers
+# ---------------------------
+def fetch_bgg_thing_xml(objectid: int) -> str:
+    url = "https://boardgamegeek.com/xmlapi2/thing"
+    r = requests.get(url, params={"id": objectid, "stats": 1}, timeout=30)
+    r.raise_for_status()
+    return r.text
+
+def parse_categories(xml_text: str) -> list[str]:
+    root = ET.fromstring(xml_text)
+    item = root.find("item")
+    if item is None:
+        return []
+    cats = []
+    for link in item.findall("link"):
+        if link.attrib.get("type") == "boardgamecategory":
+            v = link.attrib.get("value")
+            if v:
+                cats.append(v)
+    return sorted(set(cats))
+
+def load_categories_cache() -> pd.DataFrame:
+    if CATS_CACHE_PATH.exists():
+        try:
+            return pd.read_csv(CATS_CACHE_PATH)
+        except Exception:
+            return pd.DataFrame(columns=["objectid", "categories"])
+    return pd.DataFrame(columns=["objectid", "categories"])
+
+def save_categories_cache(cache_df: pd.DataFrame) -> None:
+    cache_df.to_csv(CATS_CACHE_PATH, index=False)
+
+# ---------------------------
+# Load collection
 # ---------------------------
 @st.cache_data
-def load_data():
+def load_collection():
     df = pd.read_csv("collection.csv")
 
-    # Owned only (safe even if your export already filters)
     if "own" in df.columns:
         df = df[df["own"] == 1].copy()
 
-    # Numeric conversions
-    for col in ["minplayers", "maxplayers", "avgweight", "baverage", "rating", "minplaytime", "maxplaytime", "playingtime"]:
+    for col in ["objectid", "minplayers", "maxplayers", "avgweight", "baverage"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Treat maxplayers <= 0 as unknown
     if "maxplayers" in df.columns:
         df.loc[df["maxplayers"].isna() | (df["maxplayers"] <= 0), "maxplayers"] = pd.NA
 
-    # Normalize itemtype if present
     if "itemtype" in df.columns:
         df["itemtype"] = df["itemtype"].astype(str).str.strip().str.lower()
 
+    # BGG link
+    if "objectid" in df.columns:
+        df["bgg_url"] = df["objectid"].apply(
+            lambda x: f"https://boardgamegeek.com/boardgame/{int(x)}" if pd.notna(x) else ""
+        )
+    else:
+        df["bgg_url"] = ""
+
     return df
 
-df = load_data()
+df = load_collection()
 
 # ---------------------------
 # Header
 # ---------------------------
 st.title("🎲 KSGS Board Game Picker")
-st.markdown('<div class="subtitle">Pick player count → get the games that fit, sorted how you want.</div>', unsafe_allow_html=True)
+st.markdown('<div class="subtitle">Pick player count → get the games that fit.</div>', unsafe_allow_html=True)
 
-# ---------------------------
-# Sidebar controls
-# ---------------------------
 left, right = st.columns([1, 3], gap="large")
 
+# ---------------------------
+# Sidebar Controls
+# ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
     players = st.slider("How many players tonight?", 1, 10, 4)
-
     hide_expansions = st.toggle("Hide expansions", value=True)
+    sort_display = st.selectbox("Sort by", ["BBG Score", "Weight", "Game Name"])
 
-    sort_display = st.selectbox(
-        "Sort by",
-        ["BBG Score", "Weight", "Game Name"]
-    )
+    # Category refresh/enrichment
+    st.markdown("---")
+    st.markdown("**Categories**")
+    refresh = st.button("🔄 Fetch / Refresh Categories", use_container_width=True)
+    st.caption("Run once. Uses BGG API, then caches locally for faster loads.")
 
     st.markdown("---")
-    st.caption("Tip: ‘BBG Score’ is BGG’s Bayesian score (more stable than raw averages).")
+    if st.button("🎲 Random Game", use_container_width=True):
+        if len(df) > 0:
+            st.session_state["random_pick_id"] = int(df.sample(1)["objectid"].iloc[0]) if "objectid" in df.columns else None
 
     st.markdown('</div>', unsafe_allow_html=True)
 
 # ---------------------------
+# Category enrichment / cache merge
+# ---------------------------
+cats_cache = load_categories_cache()
+
+if refresh and "objectid" in df.columns:
+    # Build a set of ids already cached
+    cached_ids = set(pd.to_numeric(cats_cache.get("objectid", pd.Series([])), errors="coerce").dropna().astype(int).tolist())
+
+    ids_to_fetch = [int(x) for x in df["objectid"].dropna().astype(int).tolist() if int(x) not in cached_ids]
+
+    progress = st.progress(0, text="Fetching categories from BGG…")
+    new_rows = []
+
+    total = len(ids_to_fetch)
+    for i, oid in enumerate(ids_to_fetch, start=1):
+        try:
+            xml_text = fetch_bgg_thing_xml(oid)
+            cats = parse_categories(xml_text)
+            new_rows.append({"objectid": oid, "categories": "; ".join(cats)})
+        except Exception:
+            new_rows.append({"objectid": oid, "categories": ""})
+
+        progress.progress(int(i / max(total, 1) * 100), text=f"Fetching categories… {i}/{total}")
+        time.sleep(1.1)  # be polite to BGG
+
+    progress.empty()
+
+    if new_rows:
+        cats_cache = pd.concat([cats_cache, pd.DataFrame(new_rows)], ignore_index=True)
+
+    # de-dupe
+    if "objectid" in cats_cache.columns:
+        cats_cache["objectid"] = pd.to_numeric(cats_cache["objectid"], errors="coerce")
+        cats_cache = cats_cache.drop_duplicates(subset=["objectid"], keep="last")
+
+    save_categories_cache(cats_cache)
+    st.success("Categories cached. Refresh the page if you don’t see them yet.")
+
+# Merge categories onto df
+if "objectid" in df.columns and "objectid" in cats_cache.columns:
+    merged = df.merge(cats_cache, on="objectid", how="left")
+else:
+    merged = df.copy()
+    merged["categories"] = ""
+
+# Create a normalized categories list column
+merged["categories"] = merged.get("categories", "").fillna("")
+merged["categories_list"] = merged["categories"].apply(
+    lambda s: [c.strip() for c in s.split(";") if c.strip()] if isinstance(s, str) else []
+)
+
+# ---------------------------
 # Filtering
 # ---------------------------
-filtered = df.copy()
+filtered = merged.copy()
 
-# Hide expansions toggle (your file has itemtype: standalone / expansion)
 if hide_expansions and "itemtype" in filtered.columns:
     filtered = filtered[filtered["itemtype"] != "expansion"]
 
-# Require minplayers
-if "minplayers" in filtered.columns:
-    filtered = filtered[filtered["minplayers"].notna()]
-
 # Player-count filter
-if "maxplayers" in filtered.columns:
-    filtered = filtered[
-        (filtered["minplayers"] <= players) &
-        ((filtered["maxplayers"].isna()) | (filtered["maxplayers"] >= players))
-    ]
-else:
-    filtered = filtered[filtered["minplayers"] <= players]
+filtered = filtered[
+    (filtered["minplayers"].notna()) &
+    (filtered["minplayers"] <= players) &
+    ((filtered["maxplayers"].isna()) | (filtered["maxplayers"] >= players))
+]
 
-# ---------------------------
+# Category filter UI (populate from cached categories)
+all_categories = sorted({c for lst in filtered["categories_list"] for c in lst})
+with left:
+    selected_categories = st.multiselect("Filter by category", options=all_categories, default=[])
+
+if selected_categories:
+    selected_set = set(selected_categories)
+    filtered = filtered[filtered["categories_list"].apply(lambda lst: bool(selected_set.intersection(set(lst))))]
+
 # Sorting
-# ---------------------------
 if sort_display == "BBG Score":
-    sort_column = "baverage"
-    descending = True
+    filtered = filtered.sort_values("baverage", ascending=False, na_position="last")
 elif sort_display == "Weight":
-    sort_column = "avgweight"
-    descending = True
+    filtered = filtered.sort_values("avgweight", ascending=False, na_position="last")
 else:
-    sort_column = "objectname"
-    descending = False
+    filtered = filtered.sort_values("objectname", ascending=True, na_position="last")
 
-if sort_column in filtered.columns:
-    filtered = filtered.sort_values(by=sort_column, ascending=not descending, na_position="last")
-
-# Round for display
+# Round values
 for col in ["avgweight", "baverage"]:
     if col in filtered.columns:
         filtered[col] = filtered[col].round(2)
@@ -136,45 +220,20 @@ for col in ["avgweight", "baverage"]:
 filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
-# Random game button
+# Weight Coloring (Green -> Red)
 # ---------------------------
-with left:
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    if st.button("🎲 Random Game", use_container_width=True):
-        if len(filtered) > 0:
-            st.session_state["random_pick_idx"] = random.randrange(len(filtered))
-        else:
-            st.session_state["random_pick_idx"] = None
-    st.markdown('</div>', unsafe_allow_html=True)
-
-# Show random pick (if chosen)
-random_pick = None
-if "random_pick_idx" in st.session_state and st.session_state["random_pick_idx"] is not None:
-    idx = st.session_state["random_pick_idx"]
-    if 0 <= idx < len(filtered):
-        random_pick = filtered.iloc[idx]
-
-# ---------------------------
-# Weight coloring (green -> red)
-# ---------------------------
-def weight_bg(val):
-    """
-    avgweight is typically ~1.0 to ~5.0.
-    We'll map 1 => green, 5 => red.
-    """
+def weight_color(val):
     try:
         x = float(val)
     except Exception:
         return ""
 
-    # clamp
     x = max(1.0, min(5.0, x))
-    t = (x - 1.0) / 4.0  # 0..1
+    t = (x - 1.0) / 4.0
 
-    # green -> red gradient
-    r = int(46 + (220 - 46) * t)
-    g = int(160 + (60 - 160) * t)
-    b = int(90 + (60 - 90) * t)
+    r = int(40 + (220 - 40) * t)
+    g = int(170 + (60 - 170) * t)
+    b = 80
 
     return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 700;"
 
@@ -182,83 +241,41 @@ def weight_bg(val):
 # Display
 # ---------------------------
 with right:
-    # Highlight random pick
-    if random_pick is not None:
-        name = random_pick.get("objectname", "Random Pick")
-        minp = random_pick.get("minplayers", "")
-        maxp = random_pick.get("maxplayers", "")
-        w = random_pick.get("avgweight", "")
-        score = random_pick.get("baverage", "")
-        year = random_pick.get("yearpublished", "")
-
-        pills = []
-        if pd.notna(minp) and pd.notna(maxp):
-            pills.append(f'<span class="pill">👥 {int(minp)}–{int(maxp)} players</span>')
-        elif pd.notna(minp):
-            pills.append(f'<span class="pill">👥 {int(minp)}+ players</span>')
-        if pd.notna(w):
-            pills.append(f'<span class="pill">🧠 Weight {w:.2f}</span>')
-        if pd.notna(score):
-            pills.append(f'<span class="pill">⭐ BBG {score:.2f}</span>')
-        if pd.notna(year):
-            pills.append(f'<span class="pill">📅 {int(year)}</span>')
-
-        st.markdown(
-            f"""
-            <div class="card">
-              <div style="font-size:1.05rem; opacity:0.75;">Tonight’s random pick:</div>
-              <div style="font-size:1.6rem; font-weight:800; margin-top: 2px;">{name}</div>
-              <div style="margin-top:10px;">{''.join(pills)}</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
     st.write(f"### {len(filtered)} games available for {players} players")
 
-    # Build a clean display table with renamed columns
     display = pd.DataFrame()
-    display["Game"] = filtered["objectname"] if "objectname" in filtered.columns else ""
+    display["Game"] = filtered["objectname"]
 
-    # Players range
-    if "minplayers" in filtered.columns and "maxplayers" in filtered.columns:
-        def p_range(row):
-            mn = row["minplayers"]
-            mx = row["maxplayers"]
-            if pd.isna(mn) and pd.isna(mx):
-                return ""
-            if pd.isna(mx):
-                return f"{int(mn)}+"
-            return f"{int(mn)}–{int(mx)}"
-        display["Players"] = filtered.apply(p_range, axis=1)
-    elif "minplayers" in filtered.columns:
-        display["Players"] = filtered["minplayers"].apply(lambda x: f"{int(x)}+" if pd.notna(x) else "")
+    display["Players"] = filtered.apply(
+        lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
+        if pd.notna(r["maxplayers"])
+        else f"{int(r['minplayers'])}+",
+        axis=1
+    )
 
-    # Weight + BBG score
-    if "avgweight" in filtered.columns:
-        display["Weight"] = filtered["avgweight"]
-    if "baverage" in filtered.columns:
-        display["BBG Score"] = filtered["baverage"]
+    display["Weight"] = filtered["avgweight"]
+    display["BBG Score"] = filtered["baverage"]
 
-    # Optional: your rating (kept, but you can remove if you want)
-    if "rating" in filtered.columns:
-        # show blanks instead of 0
-        display["Your Rating"] = filtered["rating"].where(filtered["rating"].notna() & (filtered["rating"] > 0), pd.NA)
+    # 🔗 icon column (clickable)
+    display["🔗"] = filtered["bgg_url"]
 
-    # Style weight column
-    styler = display.style
-    if "Weight" in display.columns:
-        styler = styler.applymap(weight_bg, subset=["Weight"])
+    # Optional: show categories (you can remove if you want it cleaner)
+    if "categories" in filtered.columns:
+        display["Category"] = filtered["categories"]
 
-    # Keep numbers to 2 decimals
-    fmt = {}
-    if "Weight" in display.columns:
-        fmt["Weight"] = "{:.2f}"
-    if "BBG Score" in display.columns:
-        fmt["BBG Score"] = "{:.2f}"
-    if "Your Rating" in display.columns:
-        fmt["Your Rating"] = "{:.1f}"  # your rating usually fine at 1 decimal
+    styler = display.style.applymap(weight_color, subset=["Weight"]).format({
+        "Weight": "{:.2f}",
+        "BBG Score": "{:.2f}",
+    })
 
-    styler = styler.format(fmt, na_rep="")
-
-    st.dataframe(styler, use_container_width=True, hide_index=True)
+    st.dataframe(
+        styler,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "🔗": st.column_config.LinkColumn(
+                "BGG",
+                display_text="🔗"
+            )
+        },
+    )
