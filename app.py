@@ -17,7 +17,7 @@ def load_data():
 
 df = load_data()
 
-st.title("🎲 Baird Game Picker")
+st.title("🎲 KSGS Game Picker")
 
 players = st.slider("How many players tonight?", 1, 10, 4)
 
