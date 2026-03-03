@@ -72,7 +72,7 @@ if "random_pick_id" not in st.session_state:
 # ---------------------------
 # Header
 # ---------------------------
-st.title("🎲 KSGS Board Game Picker")
+st.title("🎲 Board Game Picker")
 st.markdown('<div class="subtitle">Pick player count → get the games that fit.</div>', unsafe_allow_html=True)
 
 left, right = st.columns([1, 3], gap="large")
