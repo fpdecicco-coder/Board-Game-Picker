@@ -21,6 +21,9 @@ st.markdown(
         box-shadow: 0 1px 6px rgba(0,0,0,0.05);
         margin-bottom: 12px;
       }
+      .pick-title { font-size: 1.05rem; opacity: 0.8; margin-bottom: 4px; }
+      .pick-name { font-size: 1.35rem; font-weight: 800; line-height: 1.15; }
+      .pick-meta { margin-top: 8px; font-size: 0.95rem; opacity: 0.9; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -59,6 +62,14 @@ def load_data():
 df = load_data()
 
 # ---------------------------
+# Session state defaults
+# ---------------------------
+if "heavy_mode" not in st.session_state:
+    st.session_state["heavy_mode"] = False
+if "random_pick_id" not in st.session_state:
+    st.session_state["random_pick_id"] = None
+
+# ---------------------------
 # Header
 # ---------------------------
 st.title("🎲 KSGS Board Game Picker")
@@ -76,9 +87,21 @@ with left:
     hide_expansions = st.toggle("Hide expansions", value=True)
     sort_display = st.selectbox("Sort by", ["BBG Score", "Weight", "Game Name"])
 
-    if st.button("🎲 Random Game", use_container_width=True):
-        if len(df) > 0:
-            st.session_state["random_pick_id"] = random.choice(df["objectid"].dropna().tolist())
+    # Buttons row
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("🎲 Random Game", use_container_width=True):
+            st.session_state["random_pick_id"] = None  # clear first; will set after filtering
+            st.session_state["trigger_random"] = True
+    with c2:
+        heavy_label = "🔥 I Like It Heavy" if not st.session_state["heavy_mode"] else "🔥 Heavy Mode: ON"
+        if st.button(heavy_label, use_container_width=True):
+            st.session_state["heavy_mode"] = not st.session_state["heavy_mode"]
+            st.session_state["random_pick_id"] = None  # reset pick when mode changes
+
+    # Heavy cutoff info
+    HEAVY_CUTOFF = 3.25
+    st.caption(f"Heavy Mode filters to games with Weight ≥ {HEAVY_CUTOFF:.2f}")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -96,6 +119,11 @@ filtered = filtered[
     ((filtered["maxplayers"].isna()) | (filtered["maxplayers"] >= players))
 ]
 
+# Heavy mode filter
+HEAVY_CUTOFF = 3.25
+if st.session_state["heavy_mode"] and "avgweight" in filtered.columns:
+    filtered = filtered[filtered["avgweight"].notna() & (filtered["avgweight"] >= HEAVY_CUTOFF)]
+
 # Sorting
 if sort_display == "BBG Score":
     filtered = filtered.sort_values("baverage", ascending=False, na_position="last")
@@ -104,35 +132,53 @@ elif sort_display == "Weight":
 else:
     filtered = filtered.sort_values("objectname", ascending=True, na_position="last")
 
-# Round numbers
+# Round numbers for display
 filtered["avgweight"] = filtered["avgweight"].round(2)
 filtered["baverage"] = filtered["baverage"].round(2)
 
 filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
-# Random Pick Display
+# Random pick selection (AFTER filtering)
 # ---------------------------
-if "random_pick_id" in st.session_state:
-    rid = st.session_state["random_pick_id"]
-    match = filtered[filtered["objectid"] == rid]
-    if not match.empty:
-        row = match.iloc[0]
-        st.markdown(
-            f"""
-            <div class="card">
-              <div style="font-size:1.6rem; font-weight:800;">
-                🎲 Tonight’s Random Pick: {row['objectname']}
-              </div>
-              <div style="margin-top:8px;">
-                👥 {int(row['minplayers'])}–{int(row['maxplayers']) if pd.notna(row['maxplayers']) else "+"} |
-                🧠 Weight {row['avgweight']:.2f} |
-                ⭐ BBG {row['baverage']:.2f}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+if st.session_state.get("trigger_random", False):
+    st.session_state["trigger_random"] = False
+    if len(filtered) > 0 and "objectid" in filtered.columns:
+        st.session_state["random_pick_id"] = int(filtered.sample(1)["objectid"].iloc[0])
+    else:
+        st.session_state["random_pick_id"] = None
+
+# ---------------------------
+# Show Random Pick directly under buttons (LEFT PANEL)
+# ---------------------------
+with left:
+    if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
+        match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
+        if not match.empty:
+            row = match.iloc[0]
+            mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
+            mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
+            players_txt = f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
+            w = row["avgweight"]
+            s = row["baverage"]
+            link = row.get("bgg_url", "")
+
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="pick-title">Tonight’s pick</div>
+                  <div class="pick-name">{row['objectname']}</div>
+                  <div class="pick-meta">
+                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w:.2f} &nbsp;|&nbsp; ⭐ BBG {s:.2f}
+                    <br/>
+                    <a href="{link}" target="_blank" rel="noopener noreferrer">Open on BGG 🔗</a>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info("Your random pick isn’t in the filtered list anymore. Try Random Game again.")
 
 # ---------------------------
 # Weight Coloring
@@ -150,22 +196,25 @@ def weight_color(val):
     g = int(170 + (60 - 170) * t)
     b = 80
 
-    return f"background-color: rgb({r},{g},{b}); color: white; font-weight: bold;"
+    return f"background-color: rgb({r},{g},{b}); color: white; font-weight: 700;"
 
 # ---------------------------
-# Display Table
+# Display Table (RIGHT PANEL)
 # ---------------------------
 with right:
-    st.write(f"### {len(filtered)} games available for {players} players")
+    extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
+    st.write(f"### {len(filtered)} games available for {players} players{extra}")
 
     display = pd.DataFrame()
     display["Game"] = filtered["objectname"]
+
     display["Players"] = filtered.apply(
         lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
         if pd.notna(r["maxplayers"])
         else f"{int(r['minplayers'])}+",
         axis=1
     )
+
     display["Weight"] = filtered["avgweight"]
     display["BBG Score"] = filtered["baverage"]
     display["🔗"] = filtered["bgg_url"]
@@ -180,9 +229,6 @@ with right:
         use_container_width=True,
         hide_index=True,
         column_config={
-            "🔗": st.column_config.LinkColumn(
-                "BGG",
-                display_text="🔗"
-            )
+            "🔗": st.column_config.LinkColumn("BGG", display_text="🔗")
         },
     )
