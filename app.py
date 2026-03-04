@@ -12,7 +12,7 @@ st.set_page_config(page_title="Board Game Picker", layout="wide")
 
 RECENT_PATH = Path("recently_played.csv")
 COLLECTION_PATH = Path("collection.csv")  # ✅ local cache for instant loads
-HEAVY_CUTOFF = 3.25
+HEAVY_CUTOFF = 3.25  # fixed threshold
 
 # ---------------------------
 # Styling
@@ -115,6 +115,7 @@ def mark_played(objectid: int, played_date: Optional[date] = None) -> None:
 
 
 def clear_played(oid: int) -> None:
+    """Undo: remove any last_played record for this game."""
     rp = load_recently_played()
     if rp.empty:
         return
@@ -133,14 +134,104 @@ def days_ago(d):
 
 
 # ---------------------------
-# BGG fetch (used only when refreshing CSV)
+# CSV handling (fast path + upload)
+# ---------------------------
+@st.cache_data(ttl=60 * 60 * 24)
+def load_collection_from_csv() -> pd.DataFrame:
+    if not COLLECTION_PATH.exists():
+        return pd.DataFrame()
+    df = pd.read_csv(COLLECTION_PATH)
+
+    # Ensure expected columns exist
+    expected = ["objectid", "objectname", "itemtype", "minplayers", "maxplayers", "avgweight", "baverage", "bgg_url"]
+    for c in expected:
+        if c not in df.columns:
+            df[c] = pd.NA
+
+    df["objectid"] = pd.to_numeric(df["objectid"], errors="coerce")
+    df["minplayers"] = pd.to_numeric(df["minplayers"], errors="coerce")
+    df["maxplayers"] = pd.to_numeric(df["maxplayers"], errors="coerce")
+    df["avgweight"] = pd.to_numeric(df["avgweight"], errors="coerce")
+    df["baverage"] = pd.to_numeric(df["baverage"], errors="coerce")
+
+    # normalize itemtype
+    df["itemtype"] = df["itemtype"].astype(str).str.lower().replace(
+        {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
+    )
+
+    return df
+
+
+def save_uploaded_collection_csv(uploaded_file) -> None:
+    """
+    Accept either:
+    - your app-format collection.csv
+    - OR an arbitrary CSV that at least has ID + Name columns (we normalize)
+    """
+    df_in = pd.read_csv(uploaded_file)
+
+    # map lowercase => actual
+    colmap = {c.lower().strip(): c for c in df_in.columns}
+
+    def pick(*names):
+        for n in names:
+            key = n.lower().strip()
+            if key in colmap:
+                return colmap[key]
+        return None
+
+    oid_col = pick("objectid", "id", "object id", "gameid", "game id", "bggid", "bgg id")
+    name_col = pick("objectname", "name", "game", "title")
+
+    if oid_col is None or name_col is None:
+        raise ValueError("That CSV needs columns for game ID and game name. (Ex: objectid + objectname)")
+
+    out = pd.DataFrame()
+    out["objectid"] = pd.to_numeric(df_in[oid_col], errors="coerce")
+    out["objectname"] = df_in[name_col].astype(str)
+
+    min_col = pick("minplayers", "min players", "minplayer")
+    max_col = pick("maxplayers", "max players", "maxplayer")
+    w_col = pick("avgweight", "averageweight", "weight")
+    s_col = pick("baverage", "bayesaverage", "bgg score", "score")
+    type_col = pick("itemtype", "subtype", "type")
+    url_col = pick("bgg_url", "url", "bgg url", "link")
+
+    out["minplayers"] = pd.to_numeric(df_in[min_col], errors="coerce") if min_col else pd.NA
+    out["maxplayers"] = pd.to_numeric(df_in[max_col], errors="coerce") if max_col else pd.NA
+    out["avgweight"] = pd.to_numeric(df_in[w_col], errors="coerce") if w_col else pd.NA
+    out["baverage"] = pd.to_numeric(df_in[s_col], errors="coerce") if s_col else pd.NA
+    out["itemtype"] = df_in[type_col].astype(str).str.lower() if type_col else "boardgame"
+
+    if url_col:
+        out["bgg_url"] = df_in[url_col].astype(str)
+    else:
+        out["bgg_url"] = out["objectid"].apply(
+            lambda x: f"https://boardgamegeek.com/boardgame/{int(x)}" if pd.notna(x) else ""
+        )
+
+    out = out.dropna(subset=["objectid"])
+    out["objectid"] = out["objectid"].astype(int)
+
+    # if missing min/max, the app still runs but player filtering will be limited
+    out.to_csv(COLLECTION_PATH, index=False)
+
+
+# ---------------------------
+# BGG refresh (only when you click refresh)
 # ---------------------------
 def _get_bgg_username() -> str:
     return st.secrets.get("BGG_USERNAME", "Frankie3788")
 
 
 def _http_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> requests.Response:
-    headers = {"User-Agent": "BoardGamePicker/1.0 (Streamlit)"}
+    # More browser-like headers = fewer blocks
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; BoardGamePicker/1.0; +https://streamlit.app)",
+        "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://boardgamegeek.com/",
+    }
     return requests.get(url, params=params, headers=headers, timeout=timeout)
 
 
@@ -214,11 +305,7 @@ def _parse_thing_xml(xml_text: str) -> pd.DataFrame:
 
 
 def fetch_bgg_owned_collection_uncached(username: str) -> pd.DataFrame:
-    """
-    Uncached fetch: used ONLY when user clicks Refresh.
-    Polls /collection until ready (BGG often returns 202).
-    """
-    url = "https://boardgamegeek.com/xmlapi2/collection"
+    url = "https://www.boardgamegeek.com/xmlapi2/collection"
     params = {"username": username, "own": 1, "stats": 1}
 
     wait_seconds = 2
@@ -229,6 +316,14 @@ def fetch_bgg_owned_collection_uncached(username: str) -> pd.DataFrame:
     while waited < max_wait_total:
         r = _http_get(url, params=params, timeout=30)
         last_status = r.status_code
+
+        # ✅ If blocked/unauthorized, fail immediately (don’t pretend it’s “preparing”)
+        if r.status_code in (401, 403):
+            raise RuntimeError(
+                "BGG blocked this request (401/403). "
+                "This usually means your BGG collection is private OR Streamlit is being blocked. "
+                "Use the Upload CSV option below (recommended)."
+            )
 
         if r.status_code == 200 and _looks_like_xml(r.text):
             try:
@@ -252,7 +347,7 @@ def fetch_bgg_things_stats_uncached(object_ids: List[int]) -> pd.DataFrame:
     if not object_ids:
         return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
 
-    url = "https://boardgamegeek.com/xmlapi2/thing"
+    url = "https://www.boardgamegeek.com/xmlapi2/thing"
     all_rows = []
 
     BATCH = 75
@@ -284,6 +379,7 @@ def refresh_collection_csv() -> None:
         )
 
         ids = [int(x) for x in base["objectid"].dropna().astype(int).tolist()]
+
         status.write(f"Fetching ratings/weights for {len(ids)} games…")
         stats = fetch_bgg_things_stats_uncached(ids)
 
@@ -292,38 +388,15 @@ def refresh_collection_csv() -> None:
         if "maxplayers" in df_new.columns:
             df_new.loc[df_new["maxplayers"].isna() | (df_new["maxplayers"] <= 0), "maxplayers"] = pd.NA
 
-        # Normalize types
         df_new["objectid"] = pd.to_numeric(df_new["objectid"], errors="coerce").astype("Int64")
         df_new["minplayers"] = pd.to_numeric(df_new["minplayers"], errors="coerce")
         df_new["maxplayers"] = pd.to_numeric(df_new["maxplayers"], errors="coerce")
         df_new["avgweight"] = pd.to_numeric(df_new["avgweight"], errors="coerce")
         df_new["baverage"] = pd.to_numeric(df_new["baverage"], errors="coerce")
 
-        # Save
         df_new.to_csv(COLLECTION_PATH, index=False)
 
         status.update(label="Refresh complete ✅", state="complete")
-
-
-@st.cache_data(ttl=60 * 60 * 24)
-def load_collection_from_csv() -> pd.DataFrame:
-    if not COLLECTION_PATH.exists():
-        return pd.DataFrame()
-    df = pd.read_csv(COLLECTION_PATH)
-
-    # Ensure expected columns exist
-    expected = ["objectid", "objectname", "itemtype", "minplayers", "maxplayers", "avgweight", "baverage", "bgg_url"]
-    for c in expected:
-        if c not in df.columns:
-            df[c] = pd.NA
-
-    df["objectid"] = pd.to_numeric(df["objectid"], errors="coerce")
-    df["minplayers"] = pd.to_numeric(df["minplayers"], errors="coerce")
-    df["maxplayers"] = pd.to_numeric(df["maxplayers"], errors="coerce")
-    df["avgweight"] = pd.to_numeric(df["avgweight"], errors="coerce")
-    df["baverage"] = pd.to_numeric(df["baverage"], errors="coerce")
-
-    return df
 
 
 # ---------------------------
@@ -340,7 +413,8 @@ DEFAULTS = {
     "avoid_days": 14,
     "confirm_played_pick": False,
     "sort_display": "BBG Score",
-    "pending_action": None,
+    # table confirmation
+    "pending_action": None,  # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
 }
@@ -401,7 +475,7 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # ✅ CSV-first refresh
+    # ✅ Refresh from BGG (updates local CSV)
     if st.button("🔄 Refresh from BGG (update CSV)", use_container_width=True):
         try:
             refresh_collection_csv()
@@ -410,6 +484,21 @@ with left:
             st.rerun()
         except Exception as e:
             st.error(f"Refresh failed: {e}")
+
+    # ✅ Upload CSV (bulletproof fallback)
+    uploaded = st.file_uploader(
+        "Upload / replace collection.csv",
+        type=["csv"],
+        help="If BGG refresh fails (401/403), upload your saved collection.csv here.",
+    )
+    if uploaded is not None:
+        try:
+            save_uploaded_collection_csv(uploaded)
+            load_collection_from_csv.clear()
+            st.success("Uploaded and saved! Reloading…")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Upload failed: {e}")
 
     if st.session_state["heavy_mode"]:
         st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
@@ -424,7 +513,7 @@ with left:
     if COLLECTION_PATH.exists():
         st.caption(f"Using local cache: `{COLLECTION_PATH.name}`")
     else:
-        st.warning("No `collection.csv` found yet. Click **Refresh from BGG** once to create it.")
+        st.warning("No `collection.csv` found yet. Click Refresh from BGG OR upload a CSV once to create it.")
 
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -707,12 +796,13 @@ with right:
         st.session_state["pending_action"] = action
         st.session_state["pending_oid"] = oid
         st.session_state["pending_name"] = name
-        clear_editor_state()
+        clear_editor_state()  # revert checkbox until confirmed
         st.rerun()
 
     if st.session_state["pending_oid"] is not None:
         show_pending_dialog()
 
+    # Update baseline to current saved truth
     st.session_state[baseline_key] = {
         int(oid): bool(val)
         for oid, val in zip(
