@@ -1,7 +1,7 @@
-import random
 import time
 from datetime import date
 from pathlib import Path
+from typing import Optional, List, Dict, Any
 from xml.etree import ElementTree as ET
 
 import pandas as pd
@@ -90,7 +90,7 @@ def save_recently_played(rp: pd.DataFrame) -> None:
     rp_out.to_csv(RECENT_PATH, index=False)
 
 
-def mark_played(objectid: int, played_date: date | None = None) -> None:
+def mark_played(objectid: int, played_date: Optional[date] = None) -> None:
     played_date = played_date or date.today()
     rp = load_recently_played()
     oid = int(objectid)
@@ -136,13 +136,18 @@ def days_ago(d):
 # BGG sync (semi-automatic)
 # ---------------------------
 def _get_bgg_username() -> str:
-    # Prefer Streamlit Cloud Secrets; fallback to your username
     return st.secrets.get("BGG_USERNAME", "Frankie3788")
 
 
-def _http_get(url: str, params: dict | None = None, timeout: int = 30) -> requests.Response:
+def _http_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> requests.Response:
     headers = {"User-Agent": "BoardGamePicker/1.0 (Streamlit)"}
     return requests.get(url, params=params, headers=headers, timeout=timeout)
+
+
+def _looks_like_xml(text: str) -> bool:
+    # BGG can return XML that starts with "<items ..." (no XML declaration)
+    t = (text or "").lstrip()
+    return t.startswith("<?xml") or t.startswith("<items") or t.startswith("<message") or t.startswith("<")
 
 
 def _parse_collection_xml(xml_text: str) -> pd.DataFrame:
@@ -170,8 +175,6 @@ def _parse_collection_xml(xml_text: str) -> pd.DataFrame:
         )
 
     df = pd.DataFrame(rows)
-
-    # Normalize expansions so Hide Expansions works
     df["itemtype"] = df["itemtype"].astype(str).str.lower().replace(
         {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
     )
@@ -214,8 +217,8 @@ def _parse_thing_xml(xml_text: str) -> pd.DataFrame:
 @st.cache_data(ttl=60 * 60 * 12)
 def fetch_bgg_owned_collection(username: str) -> pd.DataFrame:
     """
-    BGG often returns 202 Accepted while it prepares collection data.
-    We poll with backoff for up to ~60 seconds and show a friendly message.
+    Polls /collection until ready (BGG often returns 202 Accepted).
+    NOTE: Avoid heavy Streamlit side-effects in cached funcs (no st.info spam).
     """
     url = "https://boardgamegeek.com/xmlapi2/collection"
     params = {"username": username, "own": 1, "stats": 1}
@@ -229,19 +232,19 @@ def fetch_bgg_owned_collection(username: str) -> pd.DataFrame:
         r = _http_get(url, params=params, timeout=30)
         last_status = r.status_code
 
-        # Success: XML payload
-        if r.status_code == 200 and r.text.strip().startswith("<?xml"):
-            return _parse_collection_xml(r.text)
+        if r.status_code == 200 and _looks_like_xml(r.text):
+            try:
+                return _parse_collection_xml(r.text)
+            except Exception:
+                # Sometimes a transient non-collection XML comes back; retry
+                pass
 
-        # Common: preparing
         if r.status_code == 202:
-            st.info(f"BGG is updating your collection… trying again in {wait_seconds}s")
             time.sleep(wait_seconds)
             waited += wait_seconds
-            wait_seconds = min(wait_seconds * 2, 10)  # backoff up to 10s
+            wait_seconds = min(wait_seconds * 2, 10)
             continue
 
-        # Other hiccups: brief wait and retry
         time.sleep(2)
         waited += 2
 
@@ -249,7 +252,7 @@ def fetch_bgg_owned_collection(username: str) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60 * 60 * 24)
-def fetch_bgg_things_stats(object_ids: list[int]) -> pd.DataFrame:
+def fetch_bgg_things_stats(object_ids: List[int]) -> pd.DataFrame:
     """Pull avgweight + bayesaverage from /thing in batches."""
     if not object_ids:
         return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
@@ -262,9 +265,12 @@ def fetch_bgg_things_stats(object_ids: list[int]) -> pd.DataFrame:
         batch = object_ids[i : i + BATCH]
         params = {"id": ",".join(map(str, batch)), "stats": 1}
         r = _http_get(url, params=params, timeout=30)
-        if r.status_code != 200:
+        if r.status_code != 200 or not _looks_like_xml(r.text):
             continue
-        all_rows.append(_parse_thing_xml(r.text))
+        try:
+            all_rows.append(_parse_thing_xml(r.text))
+        except Exception:
+            continue
 
     if not all_rows:
         return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
@@ -304,7 +310,6 @@ DEFAULTS = {
     "avoid_days": 14,
     "confirm_played_pick": False,
     "sort_display": "BBG Score",
-    # table confirmation
     "pending_action": None,  # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
@@ -332,11 +337,15 @@ def reset_filters():
 st.title("🎲 Board Game Picker")
 st.markdown('<div class="subtitle">Pick player count → get the games that fit.</div>', unsafe_allow_html=True)
 
-try:
-    df = load_collection_live()
-except Exception as e:
-    st.error(f"Couldn’t load from BGG right now: {e}")
-    st.stop()
+# Small status indicator while loading
+with st.status("Loading your BGG collection…", expanded=False) as status:
+    try:
+        df = load_collection_live()
+        status.update(label="Loaded ✅", state="complete")
+    except Exception as e:
+        status.update(label="Load failed ❌", state="error")
+        st.error(f"Couldn’t load from BGG right now: {e}")
+        st.stop()
 
 left, right = st.columns([1, 3], gap="large")
 
@@ -372,7 +381,6 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # ✅ Refresh from BGG
     if st.button("🔄 Refresh from BGG", use_container_width=True):
         fetch_bgg_owned_collection.clear()
         fetch_bgg_things_stats.clear()
@@ -447,7 +455,7 @@ if st.session_state["trigger_random"]:
         st.session_state["random_pick_id"] = None
 
 # ---------------------------
-# Random pick card (LEFT) + confirmation mark
+# Random pick card (LEFT) + mark/undo
 # ---------------------------
 with left:
     if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
@@ -486,17 +494,23 @@ with left:
                 unsafe_allow_html=True,
             )
 
-            st.checkbox("Confirm we played this game tonight", key="confirm_played_pick")
-
-            if st.button(
-                "✅ Mark as Played Today (Pick)",
-                use_container_width=True,
-                disabled=not st.session_state["confirm_played_pick"],
-            ):
-                mark_played(int(row["objectid"]), date.today())
-                st.session_state["confirm_played_pick"] = False
-                st.success("Saved!")
-                st.rerun()
+            played_today = (not pd.isna(lp)) and (lp == date.today())
+            if not played_today:
+                st.checkbox("Confirm we played this game tonight", key="confirm_played_pick")
+                if st.button(
+                    "✅ Mark as Played Today (Pick)",
+                    use_container_width=True,
+                    disabled=not st.session_state["confirm_played_pick"],
+                ):
+                    mark_played(int(row["objectid"]), date.today())
+                    st.session_state["confirm_played_pick"] = False
+                    st.success("Saved!")
+                    st.rerun()
+            else:
+                if st.button("↩️ Undo Played Today (Pick)", use_container_width=True):
+                    clear_played(int(row["objectid"]))
+                    st.success("Undone!")
+                    st.rerun()
 
 # ---------------------------
 # Confirm dialog for table checkbox actions
@@ -635,9 +649,6 @@ with right:
     baseline_map = st.session_state[baseline_key]
     pending = None
 
-    # Detect transitions:
-    # - False -> True => confirm mark
-    # - True -> False (only if saved truth is played today) => confirm undo
     for played_now, oid, name, played_today_truth in zip(
         edited["Played Tonight"].tolist(),
         editor_df["_oid"].tolist(),
@@ -663,13 +674,12 @@ with right:
         st.session_state["pending_action"] = action
         st.session_state["pending_oid"] = oid
         st.session_state["pending_name"] = name
-        clear_editor_state()  # revert checkbox until confirmed
+        clear_editor_state()
         st.rerun()
 
     if st.session_state["pending_oid"] is not None:
         show_pending_dialog()
 
-    # Update baseline to current saved truth
     st.session_state[baseline_key] = {
         int(oid): bool(val)
         for oid, val in zip(
