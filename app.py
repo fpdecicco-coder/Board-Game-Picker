@@ -1,17 +1,14 @@
 import time
 from datetime import date
 from pathlib import Path
-from typing import Optional, List, Dict, Any
-from xml.etree import ElementTree as ET
-
+from typing import Optional
 import pandas as pd
-import requests
 import streamlit as st
 
 st.set_page_config(page_title="Board Game Picker", layout="wide")
 
 RECENT_PATH = Path("recently_played.csv")
-COLLECTION_PATH = Path("collection.csv")  # ✅ local cache for instant loads
+COLLECTION_PATH = Path("collection.csv")  # local cache for instant loads
 HEAVY_CUTOFF = 3.25  # fixed threshold
 
 # ---------------------------
@@ -61,6 +58,13 @@ st.markdown(
         opacity: 0.85;
         font-size: 0.9rem;
         margin-top: 8px;
+      }
+
+      .admin-box {
+        opacity: 0.85;
+        border-top: 1px dashed rgba(0,0,0,0.12);
+        margin-top: 14px;
+        padding-top: 10px;
       }
     </style>
     """,
@@ -115,7 +119,6 @@ def mark_played(objectid: int, played_date: Optional[date] = None) -> None:
 
 
 def clear_played(oid: int) -> None:
-    """Undo: remove any last_played record for this game."""
     rp = load_recently_played()
     if rp.empty:
         return
@@ -134,15 +137,15 @@ def days_ago(d):
 
 
 # ---------------------------
-# CSV handling (fast path + upload)
+# Collection CSV (fast path)
 # ---------------------------
 @st.cache_data(ttl=60 * 60 * 24)
 def load_collection_from_csv() -> pd.DataFrame:
     if not COLLECTION_PATH.exists():
         return pd.DataFrame()
+
     df = pd.read_csv(COLLECTION_PATH)
 
-    # Ensure expected columns exist
     expected = ["objectid", "objectname", "itemtype", "minplayers", "maxplayers", "avgweight", "baverage", "bgg_url"]
     for c in expected:
         if c not in df.columns:
@@ -154,7 +157,6 @@ def load_collection_from_csv() -> pd.DataFrame:
     df["avgweight"] = pd.to_numeric(df["avgweight"], errors="coerce")
     df["baverage"] = pd.to_numeric(df["baverage"], errors="coerce")
 
-    # normalize itemtype
     df["itemtype"] = df["itemtype"].astype(str).str.lower().replace(
         {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
     )
@@ -169,8 +171,6 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
     - OR an arbitrary CSV that at least has ID + Name columns (we normalize)
     """
     df_in = pd.read_csv(uploaded_file)
-
-    # map lowercase => actual
     colmap = {c.lower().strip(): c for c in df_in.columns}
 
     def pick(*names):
@@ -212,191 +212,7 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
 
     out = out.dropna(subset=["objectid"])
     out["objectid"] = out["objectid"].astype(int)
-
-    # if missing min/max, the app still runs but player filtering will be limited
     out.to_csv(COLLECTION_PATH, index=False)
-
-
-# ---------------------------
-# BGG refresh (only when you click refresh)
-# ---------------------------
-def _get_bgg_username() -> str:
-    return st.secrets.get("BGG_USERNAME", "Frankie3788")
-
-
-def _http_get(url: str, params: Optional[Dict[str, Any]] = None, timeout: int = 30) -> requests.Response:
-    # More browser-like headers = fewer blocks
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; BoardGamePicker/1.0; +https://streamlit.app)",
-        "Accept": "application/xml,text/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://boardgamegeek.com/",
-    }
-    return requests.get(url, params=params, headers=headers, timeout=timeout)
-
-
-def _looks_like_xml(text: str) -> bool:
-    t = (text or "").lstrip()
-    return t.startswith("<?xml") or t.startswith("<items") or t.startswith("<message") or t.startswith("<")
-
-
-def _parse_collection_xml(xml_text: str) -> pd.DataFrame:
-    root = ET.fromstring(xml_text)
-    rows = []
-    for item in root.findall("item"):
-        oid = item.get("objectid")
-        subtype = item.get("subtype", "")
-        name_el = item.find("name")
-        name = name_el.text.strip() if name_el is not None and name_el.text else ""
-
-        stats = item.find("stats")
-        minp = stats.get("minplayers") if stats is not None else None
-        maxp = stats.get("maxplayers") if stats is not None else None
-
-        rows.append(
-            {
-                "objectid": int(oid) if oid and oid.isdigit() else pd.NA,
-                "objectname": name,
-                "itemtype": subtype,
-                "minplayers": pd.to_numeric(minp, errors="coerce"),
-                "maxplayers": pd.to_numeric(maxp, errors="coerce"),
-                "own": 1,
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    df["itemtype"] = df["itemtype"].astype(str).str.lower().replace(
-        {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
-    )
-    return df
-
-
-def _parse_thing_xml(xml_text: str) -> pd.DataFrame:
-    root = ET.fromstring(xml_text)
-    out = []
-    for item in root.findall("item"):
-        oid = item.get("id")
-        stats = item.find("statistics")
-        ratings = stats.find("ratings") if stats is not None else None
-
-        avgweight = None
-        bayes = None
-
-        if ratings is not None:
-            aw = ratings.find("averageweight")
-            ba = ratings.find("bayesaverage")
-            try:
-                avgweight = float(aw.get("value")) if aw is not None and aw.get("value") not in (None, "N/A") else None
-            except Exception:
-                avgweight = None
-            try:
-                bayes = float(ba.get("value")) if ba is not None and ba.get("value") not in (None, "N/A") else None
-            except Exception:
-                bayes = None
-
-        out.append(
-            {
-                "objectid": int(oid) if oid and oid.isdigit() else pd.NA,
-                "avgweight": avgweight,
-                "baverage": bayes,
-            }
-        )
-    return pd.DataFrame(out)
-
-
-def fetch_bgg_owned_collection_uncached(username: str) -> pd.DataFrame:
-    url = "https://www.boardgamegeek.com/xmlapi2/collection"
-    params = {"username": username, "own": 1, "stats": 1}
-
-    wait_seconds = 2
-    max_wait_total = 75
-    waited = 0
-    last_status = None
-
-    while waited < max_wait_total:
-        r = _http_get(url, params=params, timeout=30)
-        last_status = r.status_code
-
-        # ✅ If blocked/unauthorized, fail immediately (don’t pretend it’s “preparing”)
-        if r.status_code in (401, 403):
-            raise RuntimeError(
-                "BGG blocked this request (401/403). "
-                "This usually means your BGG collection is private OR Streamlit is being blocked. "
-                "Use the Upload CSV option below (recommended)."
-            )
-
-        if r.status_code == 200 and _looks_like_xml(r.text):
-            try:
-                return _parse_collection_xml(r.text)
-            except Exception:
-                pass
-
-        if r.status_code == 202:
-            time.sleep(wait_seconds)
-            waited += wait_seconds
-            wait_seconds = min(wait_seconds * 2, 10)
-            continue
-
-        time.sleep(2)
-        waited += 2
-
-    raise RuntimeError(f"BGG collection still preparing or unavailable (last HTTP {last_status}). Try again in a minute.")
-
-
-def fetch_bgg_things_stats_uncached(object_ids: List[int]) -> pd.DataFrame:
-    if not object_ids:
-        return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
-
-    url = "https://www.boardgamegeek.com/xmlapi2/thing"
-    all_rows = []
-
-    BATCH = 75
-    for i in range(0, len(object_ids), BATCH):
-        batch = object_ids[i : i + BATCH]
-        params = {"id": ",".join(map(str, batch)), "stats": 1}
-        r = _http_get(url, params=params, timeout=30)
-        if r.status_code != 200 or not _looks_like_xml(r.text):
-            continue
-        try:
-            all_rows.append(_parse_thing_xml(r.text))
-        except Exception:
-            continue
-
-    if not all_rows:
-        return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
-    return pd.concat(all_rows, ignore_index=True)
-
-
-def refresh_collection_csv() -> None:
-    username = _get_bgg_username()
-
-    with st.status("Refreshing from BGG…", expanded=True) as status:
-        status.write("Fetching owned collection…")
-        base = fetch_bgg_owned_collection_uncached(username)
-
-        base["bgg_url"] = base["objectid"].apply(
-            lambda x: f"https://boardgamegeek.com/boardgame/{int(x)}" if pd.notna(x) else ""
-        )
-
-        ids = [int(x) for x in base["objectid"].dropna().astype(int).tolist()]
-
-        status.write(f"Fetching ratings/weights for {len(ids)} games…")
-        stats = fetch_bgg_things_stats_uncached(ids)
-
-        df_new = base.merge(stats, on="objectid", how="left")
-
-        if "maxplayers" in df_new.columns:
-            df_new.loc[df_new["maxplayers"].isna() | (df_new["maxplayers"] <= 0), "maxplayers"] = pd.NA
-
-        df_new["objectid"] = pd.to_numeric(df_new["objectid"], errors="coerce").astype("Int64")
-        df_new["minplayers"] = pd.to_numeric(df_new["minplayers"], errors="coerce")
-        df_new["maxplayers"] = pd.to_numeric(df_new["maxplayers"], errors="coerce")
-        df_new["avgweight"] = pd.to_numeric(df_new["avgweight"], errors="coerce")
-        df_new["baverage"] = pd.to_numeric(df_new["baverage"], errors="coerce")
-
-        df_new.to_csv(COLLECTION_PATH, index=False)
-
-        status.update(label="Refresh complete ✅", state="complete")
 
 
 # ---------------------------
@@ -413,7 +229,6 @@ DEFAULTS = {
     "avoid_days": 14,
     "confirm_played_pick": False,
     "sort_display": "BBG Score",
-    # table confirmation
     "pending_action": None,  # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
@@ -444,23 +259,16 @@ st.markdown('<div class="subtitle">Pick player count → get the games that fit.
 left, right = st.columns([1, 3], gap="large")
 
 # ---------------------------
-# LEFT controls
+# LEFT controls (re-ordered per request)
 # ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
+    # Search inputs (top)
     st.slider("How many players tonight?", 1, 10, key="players")
     st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
-    st.toggle("Hide expansions", key="hide_expansions")
 
-    st.toggle("Avoid recently played in Random", key="avoid_recent")
-    st.slider(
-        "Avoid window (days)",
-        1, 120,
-        key="avoid_days",
-        disabled=not st.session_state["avoid_recent"],
-    )
-
+    # Buttons directly under search fields
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
@@ -475,21 +283,18 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-      # ✅ Upload CSV (bulletproof fallback)
-    uploaded = st.file_uploader(
-        "Upload / replace collection.csv",
-        type=["csv"],
-        help="If BGG refresh fails (401/403), upload your saved collection.csv here.",
-    )
-    if uploaded is not None:
-        try:
-            save_uploaded_collection_csv(uploaded)
-            load_collection_from_csv.clear()
-            st.success("Uploaded and saved! Reloading…")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Upload failed: {e}")
+    # Options below the buttons
+    st.toggle("Hide expansions", key="hide_expansions")
 
+    st.toggle("Avoid recently played in Random", key="avoid_recent")
+    st.slider(
+        "Avoid window (days)",
+        1, 120,
+        key="avoid_days",
+        disabled=not st.session_state["avoid_recent"],
+    )
+
+    # Heavy badge
     if st.session_state["heavy_mode"]:
         st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
     else:
@@ -503,9 +308,27 @@ with left:
     if COLLECTION_PATH.exists():
         st.caption(f"Using local cache: `{COLLECTION_PATH.name}`")
     else:
-        st.warning("No `collection.csv` found yet. Click Refresh from BGG OR upload a CSV once to create it.")
+        st.warning("No `collection.csv` found yet. Upload a CSV (bottom-left) to create it.")
 
-    st.markdown('</div>', unsafe_allow_html=True)
+    # Admin-only upload at bottom-left (collapsed)
+    st.markdown('<div class="admin-box">', unsafe_allow_html=True)
+    with st.expander("Admin: Update collection.csv", expanded=False):
+        uploaded = st.file_uploader(
+            "Upload / replace collection.csv",
+            type=["csv"],
+            help="Upload your saved collection.csv to update the app’s library.",
+        )
+        if uploaded is not None:
+            try:
+                save_uploaded_collection_csv(uploaded)
+                load_collection_from_csv.clear()
+                st.success("Uploaded and saved! Reloading…")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Upload failed: {e}")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 # ---------------------------
 # DATA LOAD (FAST)
