@@ -234,7 +234,7 @@ DEFAULTS = {
     "last_random_pick_id": None,  # ✅ prevent repeat picks
     "trigger_random": False,
     "avoid_recent": True,
-    "avoid_days": 14,
+    "avoid_days": 30,
     "confirm_played_pick": False,
     # table confirmation
     "pending_action": None,  # "mark" or "unmark"
@@ -278,7 +278,7 @@ with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
     st.slider("How many players tonight?", 1, 10, key="players")
-    st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
+    st.text_input("Search games", placeholder="e.g., Concordia…", key="search")
 
     c1, c2, c3 = st.columns(3)
     with c1:
