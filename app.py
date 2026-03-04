@@ -2,6 +2,7 @@ import time
 from datetime import date
 from pathlib import Path
 from typing import Optional
+
 import pandas as pd
 import streamlit as st
 
@@ -259,7 +260,18 @@ st.markdown('<div class="subtitle">Pick player count → get the games that fit.
 left, right = st.columns([1, 3], gap="large")
 
 # ---------------------------
+# DATA LOAD (FAST)
+# ---------------------------
+df = load_collection_from_csv()
+
+# ---------------------------
+# Filtering (works even if df is empty; we will stop later)
+# ---------------------------
+filtered = df.copy() if not df.empty else pd.DataFrame()
+
+# ---------------------------
 # LEFT controls (re-ordered per request)
+# NOTE: Random result card now renders directly under Random button row.
 # ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -283,52 +295,14 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-# ---------------------------
-# Random pick card (LEFT)
-# ---------------------------
-    if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
-        match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
-        if not match.empty:
-            row = match.iloc[0]
-
-            mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
-            mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
-            players_txt = f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
-
-            w = row.get("avgweight", pd.NA)
-            s = row.get("baverage", pd.NA)
-            link = row.get("bgg_url", "")
-            lp = row.get("last_played", pd.NA)
-            da = row.get("days_ago", pd.NA)
-
-            last_played_txt = "Never (in this app)" if pd.isna(lp) else f"{lp} ({int(da)} days ago)"
-            w_txt = f"{float(w):.2f}" if pd.notna(w) else "—"
-            s_txt = f"{float(s):.2f}" if pd.notna(s) else "—"
-
-            st.markdown(
-                f"""
-                <div class="card">
-                  <div class="pick-title">Tonight’s pick</div>
-                  <div class="pick-name">{row['objectname']}</div>
-                  <div class="pick-meta">
-                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ BBG {s_txt}
-                    <br/>
-                    🕒 Last played: {last_played_txt}
-                    <br/>
-                    <a href="{link}" target="_blank" rel="noopener noreferrer">Open on BGG 🔗</a>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-    
     # Options below the buttons
     st.toggle("Hide expansions", key="hide_expansions")
 
     st.toggle("Avoid recently played in Random", key="avoid_recent")
     st.slider(
         "Avoid window (days)",
-        1, 120,
+        1,
+        120,
         key="avoid_days",
         disabled=not st.session_state["avoid_recent"],
     )
@@ -369,15 +343,12 @@ with left:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# ---------------------------
-# DATA LOAD (FAST)
-# ---------------------------
-df = load_collection_from_csv()
+# If no collection.csv yet, stop after showing left panel (so user can upload)
 if df.empty:
     st.stop()
 
 # ---------------------------
-# Filtering
+# Filtering (now that df exists)
 # ---------------------------
 filtered = df.copy()
 
@@ -429,6 +400,53 @@ if st.session_state["trigger_random"]:
     else:
         st.session_state["random_pick_id"] = None
 
+# ---------------------------
+# Random pick card (LEFT) - render again under the buttons (no scrolling)
+# We do this by placing a placeholder in the left column at the exact spot we want.
+# ---------------------------
+# Create a placeholder right under the left card by re-entering the left column and writing immediately.
+with left:
+    # This renders directly below the left controls card (top of the left column).
+    # If you want it *inside* the card under the buttons, we can embed it there too,
+    # but this version keeps your left card clean and still prevents scrolling.
+    if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
+        match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
+        if not match.empty:
+            row = match.iloc[0]
+
+            mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
+            mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
+            players_txt = (
+                f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
+            )
+
+            w = row.get("avgweight", pd.NA)
+            s = row.get("baverage", pd.NA)
+            link = row.get("bgg_url", "")
+            lp = row.get("last_played", pd.NA)
+            da = row.get("days_ago", pd.NA)
+
+            last_played_txt = "Never (in this app)" if pd.isna(lp) else f"{lp} ({int(da)} days ago)"
+            w_txt = f"{float(w):.2f}" if pd.notna(w) else "—"
+            s_txt = f"{float(s):.2f}" if pd.notna(s) else "—"
+
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="pick-title">Tonight’s pick</div>
+                  <div class="pick-name">{row['objectname']}</div>
+                  <div class="pick-meta">
+                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ BBG {s_txt}
+                    <br/>
+                    🕒 Last played: {last_played_txt}
+                    <br/>
+                    <a href="{link}" target="_blank" rel="noopener noreferrer">Open on BGG 🔗</a>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
             played_today = (not pd.isna(lp)) and (lp == date.today())
             if not played_today:
                 st.checkbox("Confirm we played this game tonight", key="confirm_played_pick")
@@ -461,6 +479,7 @@ def show_pending_dialog():
     prompt = f"Confirm you played **{name}** today?" if action == "mark" else f"Remove **{name}** from *played today*?"
 
     if hasattr(st, "dialog"):
+
         @st.dialog(title)
         def _dlg():
             st.write(prompt)
@@ -483,6 +502,7 @@ def show_pending_dialog():
                     st.session_state["pending_name"] = None
                     clear_editor_state()
                     st.rerun()
+
         _dlg()
     else:
         st.warning(prompt)
@@ -614,7 +634,6 @@ with right:
     if st.session_state["pending_oid"] is not None:
         show_pending_dialog()
 
-    # Update baseline to current saved truth
     st.session_state[baseline_key] = {
         int(oid): bool(val)
         for oid, val in zip(
