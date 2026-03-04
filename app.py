@@ -1,4 +1,3 @@
-import time
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -161,16 +160,10 @@ def load_collection_from_csv() -> pd.DataFrame:
     df["itemtype"] = df["itemtype"].astype(str).str.lower().replace(
         {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
     )
-
     return df
 
 
 def save_uploaded_collection_csv(uploaded_file) -> None:
-    """
-    Accept either:
-    - your app-format collection.csv
-    - OR an arbitrary CSV that at least has ID + Name columns (we normalize)
-    """
     df_in = pd.read_csv(uploaded_file)
     colmap = {c.lower().strip(): c for c in df_in.columns}
 
@@ -229,7 +222,7 @@ DEFAULTS = {
     "avoid_recent": True,
     "avoid_days": 14,
     "confirm_played_pick": False,
-    "sort_display": "BBG Score",
+    # table confirmation
     "pending_action": None,  # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
@@ -260,27 +253,20 @@ st.markdown('<div class="subtitle">Pick player count → get the games that fit.
 left, right = st.columns([1, 3], gap="large")
 
 # ---------------------------
-# DATA LOAD (FAST)
+# Load collection
 # ---------------------------
 df = load_collection_from_csv()
 
 # ---------------------------
-# Filtering (works even if df is empty; we will stop later)
-# ---------------------------
-filtered = df.copy() if not df.empty else pd.DataFrame()
-
-# ---------------------------
-# LEFT controls (re-ordered per request)
-# NOTE: Random result card now renders directly under Random button row.
+# LEFT controls (Random pick card is DIRECTLY under the button row)
+# We create a placeholder right after the buttons, then fill it later after filtering.
 # ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
-    # Search inputs (top)
     st.slider("How many players tonight?", 1, 10, key="players")
     st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
 
-    # Buttons directly under search fields
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
@@ -295,7 +281,10 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # Options below the buttons
+    # ✅ Placeholder EXACTLY where you want the Random result (directly under buttons)
+    pick_slot = st.empty()
+
+    # Options below the buttons (as you requested)
     st.toggle("Hide expansions", key="hide_expansions")
 
     st.toggle("Avoid recently played in Random", key="avoid_recent")
@@ -307,7 +296,6 @@ with left:
         disabled=not st.session_state["avoid_recent"],
     )
 
-    # Heavy badge
     if st.session_state["heavy_mode"]:
         st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
     else:
@@ -348,7 +336,7 @@ if df.empty:
     st.stop()
 
 # ---------------------------
-# Filtering (now that df exists)
+# Filtering
 # ---------------------------
 filtered = df.copy()
 
@@ -401,14 +389,9 @@ if st.session_state["trigger_random"]:
         st.session_state["random_pick_id"] = None
 
 # ---------------------------
-# Random pick card (LEFT) - render again under the buttons (no scrolling)
-# We do this by placing a placeholder in the left column at the exact spot we want.
+# Render Random pick card INTO the placeholder directly under the buttons
 # ---------------------------
-# Create a placeholder right under the left card by re-entering the left column and writing immediately.
-with left:
-    # This renders directly below the left controls card (top of the left column).
-    # If you want it *inside* the card under the buttons, we can embed it there too,
-    # but this version keeps your left card clean and still prevents scrolling.
+with pick_slot.container():
     if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
         match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
         if not match.empty:
@@ -416,9 +399,7 @@ with left:
 
             mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
             mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
-            players_txt = (
-                f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
-            )
+            players_txt = f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
 
             w = row.get("avgweight", pd.NA)
             s = row.get("baverage", pd.NA)
@@ -464,6 +445,7 @@ with left:
                     clear_played(int(row["objectid"]))
                     st.success("Undone!")
                     st.rerun()
+
 
 # ---------------------------
 # Confirm dialog for table checkbox actions
@@ -526,33 +508,12 @@ def show_pending_dialog():
                 clear_editor_state()
                 st.rerun()
 
+
 # ---------------------------
-# RIGHT panel: Sort + table with confirm
+# RIGHT panel: Table ONLY (Sort By removed)
 # ---------------------------
 with right:
-    st.session_state["sort_display"] = st.selectbox(
-        "Sort by",
-        ["BBG Score", "Weight", "Game Name", "Last Played (Newest)", "Last Played (Oldest)"],
-        index=["BBG Score", "Weight", "Game Name", "Last Played (Newest)", "Last Played (Oldest)"].index(
-            st.session_state.get("sort_display", "BBG Score")
-        ),
-    )
-
     table_df = filtered.copy()
-    sort_choice = st.session_state["sort_display"]
-
-    if sort_choice == "BBG Score":
-        table_df = table_df.sort_values("baverage", ascending=False, na_position="last")
-    elif sort_choice == "Weight":
-        table_df = table_df.sort_values("avgweight", ascending=False, na_position="last")
-    elif sort_choice == "Game Name":
-        table_df = table_df.sort_values("objectname", ascending=True, na_position="last")
-    elif sort_choice == "Last Played (Newest)":
-        table_df = table_df.sort_values("last_played", ascending=False, na_position="last")
-    else:
-        table_df = table_df.sort_values("last_played", ascending=True, na_position="last")
-
-    table_df = table_df.reset_index(drop=True)
 
     extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
     st.write(f"### {len(table_df)} games available for {players} players{extra}")
