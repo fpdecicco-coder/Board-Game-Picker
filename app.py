@@ -1,8 +1,11 @@
 import random
+import time
 from datetime import date
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pandas as pd
+import requests
 import streamlit as st
 
 st.set_page_config(page_title="Board Game Picker", layout="wide")
@@ -64,36 +67,6 @@ st.markdown(
 )
 
 # ---------------------------
-# Load collection
-# ---------------------------
-@st.cache_data
-def load_collection():
-    df = pd.read_csv("collection.csv")
-
-    if "own" in df.columns:
-        df = df[df["own"] == 1].copy()
-
-    for col in ["objectid", "minplayers", "maxplayers", "avgweight", "baverage"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    if "maxplayers" in df.columns:
-        df.loc[df["maxplayers"].isna() | (df["maxplayers"] <= 0), "maxplayers"] = pd.NA
-
-    if "itemtype" in df.columns:
-        df["itemtype"] = df["itemtype"].astype(str).str.strip().str.lower()
-
-    if "objectid" in df.columns:
-        df["bgg_url"] = df["objectid"].apply(
-            lambda x: f"https://boardgamegeek.com/boardgame/{int(x)}" if pd.notna(x) else ""
-        )
-    else:
-        df["bgg_url"] = ""
-
-    return df
-
-
-# ---------------------------
 # Recently played helpers
 # ---------------------------
 def load_recently_played() -> pd.DataFrame:
@@ -110,7 +83,6 @@ def load_recently_played() -> pd.DataFrame:
 def save_recently_played(rp: pd.DataFrame) -> None:
     rp_out = rp.copy()
     if rp_out.empty:
-        # keep headers
         rp_out = pd.DataFrame(columns=["objectid", "last_played"])
     else:
         rp_out["objectid"] = rp_out["objectid"].astype(int)
@@ -142,7 +114,6 @@ def mark_played(objectid: int, played_date: date | None = None) -> None:
 
 
 def clear_played(oid: int) -> None:
-    """Remove any last_played record for this game (undo)."""
     rp = load_recently_played()
     if rp.empty:
         return
@@ -161,6 +132,150 @@ def days_ago(d):
 
 
 # ---------------------------
+# BGG Sync (semi-automatic)
+# ---------------------------
+def _get_bgg_username() -> str:
+    # Prefer secrets; fall back to your known username
+    return st.secrets.get("BGG_USERNAME", "Frankie3788")
+
+
+def _http_get(url: str, params: dict | None = None, timeout: int = 25) -> requests.Response:
+    headers = {"User-Agent": "BoardGamePicker/1.0 (Streamlit)"}
+    return requests.get(url, params=params, headers=headers, timeout=timeout)
+
+
+def _parse_collection_xml(xml_text: str) -> pd.DataFrame:
+    root = ET.fromstring(xml_text)
+    rows = []
+    for item in root.findall("item"):
+        oid = item.get("objectid")
+        subtype = item.get("subtype", "")
+        name_el = item.find("name")
+        name = name_el.text.strip() if name_el is not None and name_el.text else ""
+
+        # stats attributes are usually here
+        stats = item.find("stats")
+        minp = stats.get("minplayers") if stats is not None else None
+        maxp = stats.get("maxplayers") if stats is not None else None
+
+        # The collection endpoint can include status, numplays etc, but we only need these:
+        rows.append(
+            {
+                "objectid": int(oid) if oid and oid.isdigit() else pd.NA,
+                "objectname": name,
+                "itemtype": subtype,  # may be "boardgame" or "boardgameexpansion"
+                "minplayers": pd.to_numeric(minp, errors="coerce"),
+                "maxplayers": pd.to_numeric(maxp, errors="coerce"),
+                "own": 1,
+            }
+        )
+    df = pd.DataFrame(rows)
+    # normalize expansions to "expansion" so your hide toggle works
+    df["itemtype"] = df["itemtype"].astype(str).str.lower().replace(
+        {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
+    )
+    return df
+
+
+def _parse_thing_xml(xml_text: str) -> pd.DataFrame:
+    root = ET.fromstring(xml_text)
+    out = []
+    for item in root.findall("item"):
+        oid = item.get("id")
+        stats = item.find("statistics")
+        ratings = stats.find("ratings") if stats is not None else None
+
+        avgweight = None
+        bayes = None
+
+        if ratings is not None:
+            aw = ratings.find("averageweight")
+            ba = ratings.find("bayesaverage")
+            avgweight = float(aw.get("value")) if aw is not None and aw.get("value") not in (None, "N/A") else None
+            bayes = float(ba.get("value")) if ba is not None and ba.get("value") not in (None, "N/A") else None
+
+        out.append(
+            {
+                "objectid": int(oid) if oid and oid.isdigit() else pd.NA,
+                "avgweight": avgweight,
+                "baverage": bayes,
+            }
+        )
+    return pd.DataFrame(out)
+
+
+@st.cache_data(ttl=60 * 60 * 12)  # cache for 12 hours
+def fetch_bgg_owned_collection(username: str) -> pd.DataFrame:
+    """
+    BGG returns 202 "accepted" while it prepares data.
+    We poll a few times until we get the XML.
+    """
+    url = "https://boardgamegeek.com/xmlapi2/collection"
+    params = {"username": username, "own": 1, "stats": 1}
+
+    # Poll logic
+    for _ in range(10):
+        r = _http_get(url, params=params)
+        if r.status_code == 200 and r.text.strip().startswith("<?xml"):
+            return _parse_collection_xml(r.text)
+        if r.status_code == 202:
+            time.sleep(2)
+            continue
+        # unexpected response
+        break
+
+    raise RuntimeError("BGG collection fetch failed (try Refresh or check username).")
+
+
+@st.cache_data(ttl=60 * 60 * 24)  # cache for 24 hours
+def fetch_bgg_things_stats(object_ids: list[int]) -> pd.DataFrame:
+    """
+    Pull avgweight + bayesaverage in batches.
+    """
+    if not object_ids:
+        return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
+
+    url = "https://boardgamegeek.com/xmlapi2/thing"
+    all_rows = []
+
+    # BGG supports multiple IDs in one call; keep batch sizes reasonable
+    BATCH = 50
+    for i in range(0, len(object_ids), BATCH):
+        batch = object_ids[i : i + BATCH]
+        params = {"id": ",".join(map(str, batch)), "stats": 1}
+        r = _http_get(url, params=params)
+        if r.status_code != 200:
+            continue
+        all_rows.append(_parse_thing_xml(r.text))
+
+    if not all_rows:
+        return pd.DataFrame(columns=["objectid", "avgweight", "baverage"])
+    return pd.concat(all_rows, ignore_index=True)
+
+
+def load_collection_live() -> pd.DataFrame:
+    username = _get_bgg_username()
+    base = fetch_bgg_owned_collection(username)
+
+    # build BGG link
+    base["bgg_url"] = base["objectid"].apply(
+        lambda x: f"https://boardgamegeek.com/boardgame/{int(x)}" if pd.notna(x) else ""
+    )
+
+    # augment with weight + bayesaverage
+    ids = [int(x) for x in base["objectid"].dropna().astype(int).tolist()]
+    stats = fetch_bgg_things_stats(ids)
+
+    df = base.merge(stats, on="objectid", how="left")
+
+    # sanitize maxplayers (some imports can be weird)
+    if "maxplayers" in df.columns:
+        df.loc[df["maxplayers"].isna() | (df["maxplayers"] <= 0), "maxplayers"] = pd.NA
+
+    return df
+
+
+# ---------------------------
 # Session defaults + reset
 # ---------------------------
 DEFAULTS = {
@@ -174,12 +289,10 @@ DEFAULTS = {
     "avoid_days": 14,
     "confirm_played_pick": False,
     "sort_display": "BBG Score",
-    # table confirmation
     "pending_action": None,   # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
 }
-
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -198,12 +311,18 @@ def reset_filters():
 
 
 # ---------------------------
-# Header
+# Header + DATA LOAD
 # ---------------------------
 st.title("🎲 Board Game Picker")
 st.markdown('<div class="subtitle">Pick player count → get the games that fit.</div>', unsafe_allow_html=True)
 
-df = load_collection()
+# Live BGG load
+try:
+    df = load_collection_live()
+except Exception as e:
+    st.error(f"Couldn’t load from BGG right now: {e}")
+    st.stop()
+
 left, right = st.columns([1, 3], gap="large")
 
 # ---------------------------
@@ -217,8 +336,6 @@ with left:
     st.toggle("Hide expansions", key="hide_expansions")
 
     st.toggle("Avoid recently played in Random", key="avoid_recent")
-
-    # ✅ DISABLE this when avoid_recent is OFF
     st.slider(
         "Avoid window (days)",
         1, 120,
@@ -239,6 +356,13 @@ with left:
             st.session_state["confirm_played_pick"] = False
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
+
+    if st.button("🔄 Refresh from BGG", use_container_width=True):
+        # clears cached fetches
+        fetch_bgg_owned_collection.clear()
+        fetch_bgg_things_stats.clear()
+        st.toast("Refreshing from BGG…")
+        st.rerun()
 
     if st.session_state["heavy_mode"]:
         st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
@@ -284,8 +408,11 @@ else:
 filtered["days_ago"] = filtered["last_played"].apply(days_ago)
 
 # Round for display
-filtered["avgweight"] = filtered["avgweight"].round(2)
-filtered["baverage"] = filtered["baverage"].round(2)
+if "avgweight" in filtered.columns:
+    filtered["avgweight"] = pd.to_numeric(filtered["avgweight"], errors="coerce").round(2)
+if "baverage" in filtered.columns:
+    filtered["baverage"] = pd.to_numeric(filtered["baverage"], errors="coerce").round(2)
+
 filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
@@ -317,13 +444,16 @@ with left:
             mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
             players_txt = f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
 
-            w = row["avgweight"]
-            s = row["baverage"]
+            w = row.get("avgweight", pd.NA)
+            s = row.get("baverage", pd.NA)
             link = row.get("bgg_url", "")
             lp = row.get("last_played", pd.NA)
             da = row.get("days_ago", pd.NA)
 
             last_played_txt = "Never (in this app)" if pd.isna(lp) else f"{lp} ({int(da)} days ago)"
+
+            w_txt = f"{float(w):.2f}" if pd.notna(w) else "—"
+            s_txt = f"{float(s):.2f}" if pd.notna(s) else "—"
 
             st.markdown(
                 f"""
@@ -331,7 +461,7 @@ with left:
                   <div class="pick-title">Tonight’s pick</div>
                   <div class="pick-name">{row['objectname']}</div>
                   <div class="pick-meta">
-                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w:.2f} &nbsp;|&nbsp; ⭐ BBG {s:.2f}
+                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ BBG {s_txt}
                     <br/>
                     🕒 Last played: {last_played_txt}
                     <br/>
@@ -390,7 +520,6 @@ def show_pending_dialog():
                     st.session_state["pending_name"] = None
                     clear_editor_state()
                     st.rerun()
-
         _dlg()
     else:
         st.warning(prompt)
@@ -415,7 +544,7 @@ def show_pending_dialog():
                 st.rerun()
 
 # ---------------------------
-# RIGHT panel: Sort + table with in-table checkboxes + confirm
+# RIGHT panel: Sort + table with confirm
 # ---------------------------
 with right:
     st.session_state["sort_display"] = st.selectbox(
@@ -486,17 +615,14 @@ with right:
         },
     )
 
-    # Detect transitions in the edited checkbox:
-    # - False -> True => ask to confirm mark
-    # - True -> False (only relevant if it was actually played today) => ask to confirm undo
     baseline_map = st.session_state[baseline_key]
-    pending = None  # (action, oid, name)
+    pending = None
 
     for played_now, oid, name, played_today_truth in zip(
         edited["Played Tonight"].tolist(),
         editor_df["_oid"].tolist(),
         editor_df["Game"].tolist(),
-        editor_df["Played Tonight"].tolist(),  # truth as of last refresh
+        editor_df["Played Tonight"].tolist(),
     ):
         if pd.isna(oid):
             continue
@@ -504,12 +630,10 @@ with right:
         was = bool(baseline_map.get(oid, False))
         now = bool(played_now)
 
-        # mark request
         if now and not was:
             pending = ("mark", oid, name)
             break
 
-        # undo request (only if it was truly played today in saved data)
         if (not now) and was and bool(played_today_truth):
             pending = ("unmark", oid, name)
             break
@@ -519,14 +643,12 @@ with right:
         st.session_state["pending_action"] = action
         st.session_state["pending_oid"] = oid
         st.session_state["pending_name"] = name
-        clear_editor_state()  # revert checkbox until confirmed
+        clear_editor_state()
         st.rerun()
 
-    # Show dialog if pending
     if st.session_state["pending_oid"] is not None:
         show_pending_dialog()
 
-    # Update baseline to current saved truth (not the edited view)
     st.session_state[baseline_key] = {
         int(oid): bool(val)
         for oid, val in zip(
