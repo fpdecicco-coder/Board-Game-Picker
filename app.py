@@ -161,7 +161,7 @@ def load_collection_from_csv() -> pd.DataFrame:
         {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
     )
 
-    # ✅ Ensure bgg_url exists even if your CSV doesn't have it / has blanks
+    # Ensure bgg_url exists / is populated even if CSV doesn't have it
     df["bgg_url"] = df["bgg_url"].astype(str).replace({"nan": "", "<NA>": ""})
     missing = df["bgg_url"].str.strip().eq("") & df["objectid"].notna()
     df.loc[missing, "bgg_url"] = df.loc[missing, "objectid"].astype(int).apply(
@@ -205,7 +205,7 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
     out["baverage"] = pd.to_numeric(df_in[s_col], errors="coerce") if s_col else pd.NA
     out["itemtype"] = df_in[type_col].astype(str).str.lower() if type_col else "boardgame"
 
-    # ✅ Always produce bgg_url (even if user CSV doesn't have it)
+    # Always produce bgg_url
     if url_col:
         out["bgg_url"] = df_in[url_col].astype(str).replace({"nan": "", "<NA>": ""})
     else:
@@ -231,6 +231,7 @@ DEFAULTS = {
     "heavy_mode": False,
     "search": "",
     "random_pick_id": None,
+    "last_random_pick_id": None,  # ✅ prevent repeat picks
     "trigger_random": False,
     "avoid_recent": True,
     "avoid_days": 14,
@@ -239,7 +240,6 @@ DEFAULTS = {
     "pending_action": None,  # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
-    "last_random_pick_id": None,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
@@ -278,16 +278,16 @@ with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
     st.slider("How many players tonight?", 1, 10, key="players")
-    st.text_input("Search games", placeholder="e.g., Concordia…", key="search")
+    st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
 
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
-    # save the previous pick so we can avoid repeating it
-    st.session_state["last_random_pick_id"] = st.session_state.get("random_pick_id")
-    st.session_state["random_pick_id"] = None
-    st.session_state["trigger_random"] = True
-    st.session_state["confirm_played_pick"] = False
+            # ✅ Save previous pick so we can avoid repeating it
+            st.session_state["last_random_pick_id"] = st.session_state.get("random_pick_id")
+            st.session_state["random_pick_id"] = None
+            st.session_state["trigger_random"] = True
+            st.session_state["confirm_played_pick"] = False
     with c2:
         if st.button("🔥 Heavy", use_container_width=True):
             st.session_state["heavy_mode"] = not st.session_state["heavy_mode"]
@@ -389,17 +389,32 @@ filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
 # Random pick selection
+#   ✅ Never draw expansions
+#   ✅ Avoid recently played (optional toggle)
+#   ✅ Prevent repeating last random pick
 # ---------------------------
 if st.session_state["trigger_random"]:
     st.session_state["trigger_random"] = False
     pool = filtered.copy()
 
+    # ✅ Never allow expansions in Random (even if they’re visible in table)
+    if "itemtype" in pool.columns:
+        pool = pool[pool["itemtype"] != "expansion"]
+
+    # ✅ Avoid recently played
     if st.session_state["avoid_recent"]:
         window = int(st.session_state["avoid_days"])
         pool = pool[(pool["days_ago"].isna()) | (pool["days_ago"] >= window)]
 
+    # ✅ Prevent repeating last pick
+    last_id = st.session_state.get("last_random_pick_id")
+    if last_id is not None and "objectid" in pool.columns and len(pool) > 1:
+        pool = pool[pool["objectid"].astype(int) != int(last_id)]
+
     if len(pool) > 0 and "objectid" in pool.columns:
-        st.session_state["random_pick_id"] = int(pool.sample(1)["objectid"].iloc[0])
+        new_id = int(pool.sample(1)["objectid"].iloc[0])
+        st.session_state["random_pick_id"] = new_id
+        st.session_state["last_random_pick_id"] = new_id
     else:
         st.session_state["random_pick_id"] = None
 
@@ -415,7 +430,7 @@ with pick_slot.container():
             mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
             mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
             players_txt = (
-                f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
+                f"👥 {mn}–{mx}" if (mn is not None and mx is not None) else (f"👥 {mn}+" if mn is not None else "")
             )
 
             w = row.get("avgweight", pd.NA)
@@ -434,7 +449,7 @@ with pick_slot.container():
                   <div class="pick-title">Tonight’s pick</div>
                   <div class="pick-name">{row['objectname']}</div>
                   <div class="pick-meta">
-                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ BGG {s_txt}
+                    {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ {s_txt}
                     <br/>
                     🕒 Last played: {last_played_txt}
                     <br/>
@@ -527,7 +542,10 @@ def show_pending_dialog():
 
 
 # ---------------------------
-# RIGHT panel: Table ONLY (links restored)
+# RIGHT panel: Table ONLY
+#   ✅ Players have 👥 badge
+#   ✅ BGG score has ⭐
+#   ✅ Link column shows 🔗
 # ---------------------------
 with right:
     table_df = filtered.copy()
@@ -541,23 +559,23 @@ with right:
             "Played Tonight": table_df["last_played"].apply(lambda d: (not pd.isna(d)) and (d == date.today())),
             "Game": table_df["objectname"],
             "Players": table_df.apply(
-                lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
+                lambda r: f"👥 {int(r['minplayers'])}–{int(r['maxplayers'])}"
                 if pd.notna(r["maxplayers"])
-                else f"{int(r['minplayers'])}+",
+                else f"👥 {int(r['minplayers'])}+",
                 axis=1,
             ),
-"Weight": table_df["avgweight"].apply(
-    lambda w: (
-        f"🟢 {w:.2f}" if pd.notna(w) and w < 2
-        else f"🟡 {w:.2f}" if pd.notna(w) and w < 3
-        else f"🟠 {w:.2f}" if pd.notna(w) and w < 3.75
-        else f"🔴 {w:.2f}" if pd.notna(w)
-        else ""
-    )
-),            "BGG Score": table_df["baverage"],
+            "Weight": table_df["avgweight"].apply(
+                lambda w: (
+                    f"🟢 {w:.2f}" if pd.notna(w) and w < 2
+                    else f"🟡 {w:.2f}" if pd.notna(w) and w < 3
+                    else f"🟠 {w:.2f}" if pd.notna(w) and w < 3.75
+                    else f"🔴 {w:.2f}" if pd.notna(w)
+                    else ""
+                )
+            ),
+            "BGG Score": table_df["baverage"].apply(lambda x: f"⭐ {float(x):.2f}" if pd.notna(x) else ""),
             "Last Played": table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""}),
             "Days Ago": table_df["days_ago"],
-            # ✅ Use a REAL url column; LinkColumn will render it clickable
             "BGG": table_df["bgg_url"],
             "_oid": table_df["objectid"],
         }
@@ -582,7 +600,6 @@ with right:
         disabled=["Game", "Players", "Weight", "BGG Score", "Last Played", "Days Ago", "BGG"],
         column_config={
             "Played Tonight": st.column_config.CheckboxColumn("Played Tonight"),
-            # ✅ “BGG logo” style link (clickable)
             "BGG": st.column_config.LinkColumn("BGG", display_text="🔗", width="small"),
         },
     )
