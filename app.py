@@ -12,60 +12,115 @@ COLLECTION_PATH = Path("collection.csv")  # local cache for instant loads
 HEAVY_CUTOFF = 3.25  # fixed threshold
 
 # ---------------------------
+# Session defaults + reset
+# ---------------------------
+DEFAULTS = {
+    "players": 4,
+    "hide_expansions": False,  # default OFF
+    "heavy_mode": False,
+    "search": "",
+    "random_pick_id": None,
+    "last_random_pick_id": None,  # prevent repeat picks
+    "trigger_random": False,
+    "avoid_recent": True,
+    "avoid_days": 14,
+    "confirm_played_pick": False,
+    # table confirmation
+    "pending_action": None,  # "mark" or "unmark"
+    "pending_oid": None,
+    "pending_name": None,
+}
+for k, v in DEFAULTS.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
+def clear_editor_state():
+    if "games_editor" in st.session_state:
+        del st.session_state["games_editor"]
+
+
+def reset_filters():
+    for k, v in DEFAULTS.items():
+        st.session_state[k] = v
+    clear_editor_state()
+    st.rerun()
+
+
+# ---------------------------
 # Styling
 # ---------------------------
-st.markdown(
-    """
-    <style>
-      .block-container { padding-top: 1.2rem; }
-      h1 { margin-bottom: 0.2rem; }
-      .subtitle { opacity: 0.85; margin-top: -0.4rem; margin-bottom: 1rem; }
+heavy_on = bool(st.session_state.get("heavy_mode"))
+random_has_pick = st.session_state.get("random_pick_id") is not None
 
-      .card {
+# NOTE: This colors buttons by position in the first button row:
+#  - 1st button = Random -> green when a pick exists
+#  - 2nd button = Heavy  -> red when heavy mode is on
+random_css = (
+    """
+    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(1) button {
+        background: #2a9d8f !important;
+        color: white !important;
+        border: 1px solid rgba(0,0,0,0.08) !important;
+    }
+    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(1) button:hover {
+        filter: brightness(0.95);
+    }
+    """
+    if random_has_pick
+    else ""
+)
+
+heavy_css = (
+    """
+    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(2) button {
+        background: #d62828 !important;
+        color: white !important;
+        border: 1px solid rgba(0,0,0,0.08) !important;
+    }
+    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(2) button:hover {
+        filter: brightness(0.95);
+    }
+    """
+    if heavy_on
+    else ""
+)
+
+st.markdown(
+    f"""
+    <style>
+      .block-container {{ padding-top: 1.2rem; }}
+      h1 {{ margin-bottom: 0.2rem; }}
+      .subtitle {{ opacity: 0.85; margin-top: -0.4rem; margin-bottom: 1rem; }}
+
+      .card {{
         border: 1px solid rgba(0,0,0,0.08);
         border-radius: 14px;
         padding: 14px 16px;
         background: rgba(255,255,255,0.88);
         box-shadow: 0 1px 6px rgba(0,0,0,0.05);
         margin-bottom: 12px;
-      }
+      }}
 
-      .pick-title { font-size: 1.05rem; opacity: 0.8; margin-bottom: 4px; }
-      .pick-name { font-size: 1.35rem; font-weight: 800; line-height: 1.15; }
-      .pick-meta { margin-top: 8px; font-size: 0.95rem; opacity: 0.9; }
+      .pick-title {{ font-size: 1.05rem; opacity: 0.8; margin-bottom: 4px; }}
+      .pick-name {{ font-size: 1.35rem; font-weight: 800; line-height: 1.15; }}
+      .pick-meta {{ margin-top: 8px; font-size: 0.95rem; opacity: 0.9; }}
 
-      .badge {
-        display:inline-block;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-weight: 800;
-        font-size: 0.9rem;
-        letter-spacing: 0.3px;
-        margin-top: 10px;
-      }
-      .badge-on {
-        background: rgba(220, 60, 60, 0.12);
-        border: 1px solid rgba(220, 60, 60, 0.35);
-        color: rgb(170, 30, 30);
-      }
-      .badge-off {
-        background: rgba(40, 180, 120, 0.12);
-        border: 1px solid rgba(40, 180, 120, 0.35);
-        color: rgb(20, 120, 80);
-      }
-
-      .mini {
+      .mini {{
         opacity: 0.85;
         font-size: 0.9rem;
         margin-top: 8px;
-      }
+      }}
 
-      .admin-box {
+      .admin-box {{
         opacity: 0.85;
         border-top: 1px dashed rgba(0,0,0,0.12);
         margin-top: 14px;
         padding-top: 10px;
-      }
+      }}
+
+      {random_css}
+      {heavy_css}
     </style>
     """,
     unsafe_allow_html=True,
@@ -161,9 +216,9 @@ def load_collection_from_csv() -> pd.DataFrame:
         {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
     )
 
-    # Ensure bgg_url exists / is populated even if CSV doesn't have it
-    df["bgg_url"] = df["bgg_url"].astype(str).replace({"nan": "", "<NA>": ""})
-    missing = df["bgg_url"].str.strip().eq("") & df["objectid"].notna()
+    # Ensure bgg_url exists even if missing / blank
+    df["bgg_url"] = df["bgg_url"].astype(str).replace({"nan": "", "<NA>": ""}).str.strip()
+    missing = df["bgg_url"].eq("") & df["objectid"].notna()
     df.loc[missing, "bgg_url"] = df.loc[missing, "objectid"].astype(int).apply(
         lambda oid: f"https://boardgamegeek.com/boardgame/{oid}"
     )
@@ -205,9 +260,8 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
     out["baverage"] = pd.to_numeric(df_in[s_col], errors="coerce") if s_col else pd.NA
     out["itemtype"] = df_in[type_col].astype(str).str.lower() if type_col else "boardgame"
 
-    # Always produce bgg_url
     if url_col:
-        out["bgg_url"] = df_in[url_col].astype(str).replace({"nan": "", "<NA>": ""})
+        out["bgg_url"] = df_in[url_col].astype(str).replace({"nan": "", "<NA>": ""}).str.strip()
     else:
         out["bgg_url"] = ""
 
@@ -220,42 +274,6 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
     )
 
     out.to_csv(COLLECTION_PATH, index=False)
-
-
-# ---------------------------
-# Session defaults + reset
-# ---------------------------
-DEFAULTS = {
-    "players": 4,
-    "hide_expansions": False,  # default OFF
-    "heavy_mode": False,
-    "search": "",
-    "random_pick_id": None,
-    "last_random_pick_id": None,  # ✅ prevent repeat picks
-    "trigger_random": False,
-    "avoid_recent": True,
-    "avoid_days": 14,
-    "confirm_played_pick": False,
-    # table confirmation
-    "pending_action": None,  # "mark" or "unmark"
-    "pending_oid": None,
-    "pending_name": None,
-}
-for k, v in DEFAULTS.items():
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-
-def clear_editor_state():
-    if "games_editor" in st.session_state:
-        del st.session_state["games_editor"]
-
-
-def reset_filters():
-    for k, v in DEFAULTS.items():
-        st.session_state[k] = v
-    clear_editor_state()
-    st.rerun()
 
 
 # ---------------------------
@@ -283,7 +301,7 @@ with left:
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
-            # ✅ Save previous pick so we can avoid repeating it
+            # Save previous pick to avoid repeat
             st.session_state["last_random_pick_id"] = st.session_state.get("random_pick_id")
             st.session_state["random_pick_id"] = None
             st.session_state["trigger_random"] = True
@@ -296,10 +314,15 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # ✅ placeholder EXACTLY here
+    # placeholder EXACTLY here
     pick_slot = st.empty()
 
-    # Options below the buttons
+    # moved up (before Hide Expansions) per your request
+    st.markdown(
+        f'<div class="mini">Heavy Mode filters to games with <b>Weight ≥ {HEAVY_CUTOFF:.2f}</b>.</div>',
+        unsafe_allow_html=True,
+    )
+
     st.toggle("Hide expansions", key="hide_expansions")
 
     st.toggle("Avoid recently played in Random", key="avoid_recent")
@@ -311,22 +334,11 @@ with left:
         disabled=not st.session_state["avoid_recent"],
     )
 
-    if st.session_state["heavy_mode"]:
-        st.markdown('<span class="badge badge-on">HEAVY MODE: ON</span>', unsafe_allow_html=True)
-    else:
-        st.markdown('<span class="badge badge-off">HEAVY MODE: OFF</span>', unsafe_allow_html=True)
-
-    st.markdown(
-        f'<div class="mini">Heavy Mode filters to games with <b>Weight ≥ {HEAVY_CUTOFF:.2f}</b>.</div>',
-        unsafe_allow_html=True,
-    )
-
     if COLLECTION_PATH.exists():
         st.caption(f"Using local cache: `{COLLECTION_PATH.name}`")
     else:
         st.warning("No `collection.csv` found yet. Upload a CSV (bottom-left) to create it.")
 
-    # Admin-only upload at bottom-left (collapsed)
     st.markdown('<div class="admin-box">', unsafe_allow_html=True)
     with st.expander("Admin: Update collection.csv", expanded=False):
         uploaded = st.file_uploader(
@@ -389,24 +401,22 @@ filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
 # Random pick selection
-#   ✅ Never draw expansions
-#   ✅ Avoid recently played (optional toggle)
-#   ✅ Prevent repeating last random pick
+#   - Never draw expansions
+#   - Avoid recently played (optional)
+#   - Prevent repeating last pick
 # ---------------------------
 if st.session_state["trigger_random"]:
     st.session_state["trigger_random"] = False
     pool = filtered.copy()
 
-    # ✅ Never allow expansions in Random (even if they’re visible in table)
+    # Never allow expansions in Random (even if visible in table)
     if "itemtype" in pool.columns:
-        pool = pool[pool["itemtype"] != "expansion"]
+        pool = pool[pool["itemtype"].astype(str).str.lower() != "expansion"]
 
-    # ✅ Avoid recently played
     if st.session_state["avoid_recent"]:
         window = int(st.session_state["avoid_days"])
         pool = pool[(pool["days_ago"].isna()) | (pool["days_ago"] >= window)]
 
-    # ✅ Prevent repeating last pick
     last_id = st.session_state.get("last_random_pick_id")
     if last_id is not None and "objectid" in pool.columns and len(pool) > 1:
         pool = pool[pool["objectid"].astype(int) != int(last_id)]
@@ -543,9 +553,6 @@ def show_pending_dialog():
 
 # ---------------------------
 # RIGHT panel: Table ONLY
-#   ✅ Players have 👥 badge
-#   ✅ BGG score has ⭐
-#   ✅ Link column shows 🔗
 # ---------------------------
 with right:
     table_df = filtered.copy()
