@@ -220,7 +220,7 @@ DEFAULTS = {
     "random_pick_id": None,
     "trigger_random": False,
     "avoid_recent": True,
-    "avoid_days": 14,
+    "avoid_days": 30,
     "confirm_played_pick": False,
     # table confirmation
     "pending_action": None,  # "mark" or "unmark"
