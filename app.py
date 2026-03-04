@@ -239,6 +239,7 @@ DEFAULTS = {
     "pending_action": None,  # "mark" or "unmark"
     "pending_oid": None,
     "pending_name": None,
+    "last_random_pick_id": None,
 }
 for k, v in DEFAULTS.items():
     if k not in st.session_state:
