@@ -283,7 +283,9 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-with left:
+# ---------------------------
+# Random pick card (LEFT)
+# ---------------------------
     if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
         match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
         if not match.empty:
@@ -426,10 +428,6 @@ if st.session_state["trigger_random"]:
         st.session_state["random_pick_id"] = int(pool.sample(1)["objectid"].iloc[0])
     else:
         st.session_state["random_pick_id"] = None
-
-# ---------------------------
-# Random pick card (LEFT)
-# ---------------------------
 
             played_today = (not pd.isna(lp)) and (lp == date.today())
             if not played_today:
