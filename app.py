@@ -580,7 +580,7 @@ with right:
         column_config={
             "Played Tonight": st.column_config.CheckboxColumn("Played Tonight"),
             # ✅ “BGG logo” style link (clickable)
-            "BGG": st.column_config.LinkColumn("BGG", display_text="🟧", width="small"),
+            "BGG": st.column_config.LinkColumn("BGG", display_text="🔗", width="small"),
         },
     )
 
