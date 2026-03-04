@@ -146,18 +146,7 @@ def load_collection_from_csv() -> pd.DataFrame:
 
     df = pd.read_csv(COLLECTION_PATH)
 
-    # ✅ Added "thumbnail" column support
-    expected = [
-        "objectid",
-        "objectname",
-        "itemtype",
-        "minplayers",
-        "maxplayers",
-        "avgweight",
-        "baverage",
-        "bgg_url",
-        "thumbnail",
-    ]
+    expected = ["objectid", "objectname", "itemtype", "minplayers", "maxplayers", "avgweight", "baverage", "bgg_url"]
     for c in expected:
         if c not in df.columns:
             df[c] = pd.NA
@@ -172,21 +161,17 @@ def load_collection_from_csv() -> pd.DataFrame:
         {"boardgameexpansion": "expansion", "boardgame": "boardgame"}
     )
 
-    # Normalize blanks
-    df["thumbnail"] = df["thumbnail"].astype(str).replace({"nan": "", "<NA>": ""})
-    df.loc[df["thumbnail"].str.lower().isin(["none", "na"]), "thumbnail"] = ""
-
+    # ✅ Ensure bgg_url exists even if your CSV doesn't have it / has blanks
     df["bgg_url"] = df["bgg_url"].astype(str).replace({"nan": "", "<NA>": ""})
+    missing = df["bgg_url"].str.strip().eq("") & df["objectid"].notna()
+    df.loc[missing, "bgg_url"] = df.loc[missing, "objectid"].astype(int).apply(
+        lambda oid: f"https://boardgamegeek.com/boardgame/{oid}"
+    )
 
     return df
 
 
 def save_uploaded_collection_csv(uploaded_file) -> None:
-    """
-    Accept either:
-    - your app-format collection.csv
-    - OR an arbitrary CSV that at least has ID + Name columns (we normalize)
-    """
     df_in = pd.read_csv(uploaded_file)
     colmap = {c.lower().strip(): c for c in df_in.columns}
 
@@ -199,6 +184,7 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
 
     oid_col = pick("objectid", "id", "object id", "gameid", "game id", "bggid", "bgg id")
     name_col = pick("objectname", "name", "game", "title")
+
     if oid_col is None or name_col is None:
         raise ValueError("That CSV needs columns for game ID and game name. (Ex: objectid + objectname)")
 
@@ -212,7 +198,6 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
     s_col = pick("baverage", "bayesaverage", "bgg score", "score")
     type_col = pick("itemtype", "subtype", "type")
     url_col = pick("bgg_url", "url", "bgg url", "link")
-    thumb_col = pick("thumbnail", "thumb", "image", "img", "cover", "cover_url")
 
     out["minplayers"] = pd.to_numeric(df_in[min_col], errors="coerce") if min_col else pd.NA
     out["maxplayers"] = pd.to_numeric(df_in[max_col], errors="coerce") if max_col else pd.NA
@@ -220,17 +205,20 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
     out["baverage"] = pd.to_numeric(df_in[s_col], errors="coerce") if s_col else pd.NA
     out["itemtype"] = df_in[type_col].astype(str).str.lower() if type_col else "boardgame"
 
+    # ✅ Always produce bgg_url (even if user CSV doesn't have it)
     if url_col:
-        out["bgg_url"] = df_in[url_col].astype(str)
+        out["bgg_url"] = df_in[url_col].astype(str).replace({"nan": "", "<NA>": ""})
     else:
-        out["bgg_url"] = out["objectid"].apply(
-            lambda x: f"https://boardgamegeek.com/boardgame/{int(x)}" if pd.notna(x) else ""
-        )
-
-    out["thumbnail"] = df_in[thumb_col].astype(str) if thumb_col else ""
+        out["bgg_url"] = ""
 
     out = out.dropna(subset=["objectid"])
     out["objectid"] = out["objectid"].astype(int)
+
+    missing = out["bgg_url"].astype(str).str.strip().eq("")
+    out.loc[missing, "bgg_url"] = out.loc[missing, "objectid"].apply(
+        lambda oid: f"https://boardgamegeek.com/boardgame/{int(oid)}"
+    )
+
     out.to_csv(COLLECTION_PATH, index=False)
 
 
@@ -239,7 +227,7 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
 # ---------------------------
 DEFAULTS = {
     "players": 4,
-    "hide_expansions": False,  # ✅ default OFF
+    "hide_expansions": False,  # default OFF
     "heavy_mode": False,
     "search": "",
     "random_pick_id": None,
@@ -283,8 +271,7 @@ left, right = st.columns([1, 3], gap="large")
 df = load_collection_from_csv()
 
 # ---------------------------
-# LEFT controls
-# Random pick card renders DIRECTLY under the buttons via pick_slot placeholder.
+# LEFT controls (Random pick card EXACTLY under buttons)
 # ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
@@ -306,7 +293,7 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # ✅ EXACT location: right under the button row
+    # ✅ placeholder EXACTLY here
     pick_slot = st.empty()
 
     # Options below the buttons
@@ -537,7 +524,7 @@ def show_pending_dialog():
 
 
 # ---------------------------
-# RIGHT panel: Table ONLY (no Sort By)
+# RIGHT panel: Table ONLY (links restored)
 # ---------------------------
 with right:
     table_df = filtered.copy()
@@ -546,14 +533,9 @@ with right:
     st.write(f"### {len(table_df)} games available for {players} players{extra}")
     st.caption("Toggle ✅ Played Tonight (you’ll be asked to confirm). Uncheck to undo.")
 
-    # ✅ “BGG logo” link icon (clickable)
-    # Using an icon character because data_editor can't do clickable image logos.
-    bgg_icon = "🟧"  # acts like a simple BGG “logo” button
-
     editor_df = pd.DataFrame(
         {
             "Played Tonight": table_df["last_played"].apply(lambda d: (not pd.isna(d)) and (d == date.today())),
-            "Thumb": table_df.get("thumbnail", "").astype(str).replace({"nan": "", "<NA>": ""}),
             "Game": table_df["objectname"],
             "Players": table_df.apply(
                 lambda r: f"{int(r['minplayers'])}–{int(r['maxplayers'])}"
@@ -562,10 +544,10 @@ with right:
                 axis=1,
             ),
             "Weight": table_df["avgweight"],
-            "BGG Score": table_df["baverage"],  # ✅ fixed header casing
+            "BGG Score": table_df["baverage"],
             "Last Played": table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""}),
             "Days Ago": table_df["days_ago"],
-            # show the icon, but store link as actual url in same cell (LinkColumn handles it)
+            # ✅ Use a REAL url column; LinkColumn will render it clickable
             "BGG": table_df["bgg_url"],
             "_oid": table_df["objectid"],
         }
@@ -587,12 +569,11 @@ with right:
         key="games_editor",
         use_container_width=True,
         hide_index=True,
-        disabled=["Thumb", "Game", "Players", "Weight", "BGG Score", "Last Played", "Days Ago", "BGG"],
+        disabled=["Game", "Players", "Weight", "BGG Score", "Last Played", "Days Ago", "BGG"],
         column_config={
             "Played Tonight": st.column_config.CheckboxColumn("Played Tonight"),
-            "Thumb": st.column_config.ImageColumn("Thumb", width="small"),
-            # Link column displays the “logo” as the clickable text
-            "BGG": st.column_config.LinkColumn("BGG", display_text=bgg_icon, width="small"),
+            # ✅ “BGG logo” style link (clickable)
+            "BGG": st.column_config.LinkColumn("BGG", display_text="🟧", width="small"),
         },
     )
 
@@ -624,7 +605,7 @@ with right:
         st.session_state["pending_action"] = action
         st.session_state["pending_oid"] = oid
         st.session_state["pending_name"] = name
-        clear_editor_state()  # revert checkbox until confirmed
+        clear_editor_state()
         st.rerun()
 
     if st.session_state["pending_oid"] is not None:
