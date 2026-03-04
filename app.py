@@ -283,6 +283,43 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
+with left:
+    if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
+        match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
+        if not match.empty:
+            row = match.iloc[0]
+
+            mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
+            mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
+            players_txt = f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
+
+            w = row.get("avgweight", pd.NA)
+            s = row.get("baverage", pd.NA)
+            link = row.get("bgg_url", "")
+            lp = row.get("last_played", pd.NA)
+            da = row.get("days_ago", pd.NA)
+
+            last_played_txt = "Never (in this app)" if pd.isna(lp) else f"{lp} ({int(da)} days ago)"
+            w_txt = f"{float(w):.2f}" if pd.notna(w) else "—"
+            s_txt = f"{float(s):.2f}" if pd.notna(s) else "—"
+
+            st.markdown(
+                f"""
+                <div class="card">
+                  <div class="pick-title">Tonight’s pick</div>
+                  <div class="pick-name">{row['objectname']}</div>
+                  <div class="pick-meta">
+                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ BBG {s_txt}
+                    <br/>
+                    🕒 Last played: {last_played_txt}
+                    <br/>
+                    <a href="{link}" target="_blank" rel="noopener noreferrer">Open on BGG 🔗</a>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    
     # Options below the buttons
     st.toggle("Hide expansions", key="hide_expansions")
 
@@ -393,42 +430,6 @@ if st.session_state["trigger_random"]:
 # ---------------------------
 # Random pick card (LEFT)
 # ---------------------------
-with left:
-    if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
-        match = filtered[filtered["objectid"] == st.session_state["random_pick_id"]]
-        if not match.empty:
-            row = match.iloc[0]
-
-            mn = int(row["minplayers"]) if pd.notna(row["minplayers"]) else None
-            mx = int(row["maxplayers"]) if pd.notna(row["maxplayers"]) else None
-            players_txt = f"{mn}–{mx}" if (mn is not None and mx is not None) else (f"{mn}+" if mn is not None else "")
-
-            w = row.get("avgweight", pd.NA)
-            s = row.get("baverage", pd.NA)
-            link = row.get("bgg_url", "")
-            lp = row.get("last_played", pd.NA)
-            da = row.get("days_ago", pd.NA)
-
-            last_played_txt = "Never (in this app)" if pd.isna(lp) else f"{lp} ({int(da)} days ago)"
-            w_txt = f"{float(w):.2f}" if pd.notna(w) else "—"
-            s_txt = f"{float(s):.2f}" if pd.notna(s) else "—"
-
-            st.markdown(
-                f"""
-                <div class="card">
-                  <div class="pick-title">Tonight’s pick</div>
-                  <div class="pick-name">{row['objectname']}</div>
-                  <div class="pick-meta">
-                    👥 {players_txt} &nbsp;|&nbsp; 🧠 Weight {w_txt} &nbsp;|&nbsp; ⭐ BBG {s_txt}
-                    <br/>
-                    🕒 Last played: {last_played_txt}
-                    <br/>
-                    <a href="{link}" target="_blank" rel="noopener noreferrer">Open on BGG 🔗</a>
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
 
             played_today = (not pd.isna(lp)) and (lp == date.today())
             if not played_today:
