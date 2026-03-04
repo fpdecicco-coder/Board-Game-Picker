@@ -240,7 +240,7 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
 # ---------------------------
 # Header (changes when Heavy Mode is on)
 # ---------------------------
-title = "🔥🎲 Board Game Picker" if st.session_state["heavy_mode"] else "🎲 Board Game Picker"
+title = "🎲 Board Game Picker" if st.session_state["heavy_mode"] else "🎲 Board Game Picker"
 st.title(title)
 st.markdown('<div class="subtitle">Pick player count → get the games that fit.</div>', unsafe_allow_html=True)
 
@@ -263,7 +263,7 @@ with left:
     if st.session_state["heavy_mode"]:
         st.markdown("🔥 **Heavy Mode Active**")
 
-    st.text_input("Search games", placeholder="Concordia.", key="search")  # ✅ placeholder updated
+    st.text_input("Search games", placeholder="i.e.Concordia...", key="search")  # ✅ placeholder updated
 
     c1, c2, c3 = st.columns(3)
     with c1:
