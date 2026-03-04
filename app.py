@@ -283,9 +283,11 @@ with left:
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
-            st.session_state["random_pick_id"] = None
-            st.session_state["trigger_random"] = True
-            st.session_state["confirm_played_pick"] = False
+    # save the previous pick so we can avoid repeating it
+    st.session_state["last_random_pick_id"] = st.session_state.get("random_pick_id")
+    st.session_state["random_pick_id"] = None
+    st.session_state["trigger_random"] = True
+    st.session_state["confirm_played_pick"] = False
     with c2:
         if st.button("🔥 Heavy", use_container_width=True):
             st.session_state["heavy_mode"] = not st.session_state["heavy_mode"]
