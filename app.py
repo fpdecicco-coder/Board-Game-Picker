@@ -475,17 +475,7 @@ with left:
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # ✅ Refresh from BGG (updates local CSV)
-    if st.button("🔄 Refresh from BGG (update CSV)", use_container_width=True):
-        try:
-            refresh_collection_csv()
-            load_collection_from_csv.clear()
-            st.toast("Updated collection.csv ✅")
-            st.rerun()
-        except Exception as e:
-            st.error(f"Refresh failed: {e}")
-
-    # ✅ Upload CSV (bulletproof fallback)
+      # ✅ Upload CSV (bulletproof fallback)
     uploaded = st.file_uploader(
         "Upload / replace collection.csv",
         type=["csv"],
