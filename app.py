@@ -23,7 +23,7 @@ DEFAULTS = {
     "last_random_pick_id": None,  # prevent repeat picks
     "trigger_random": False,
     "avoid_recent": True,
-    "avoid_days": 14,
+    "avoid_days": 30,  # ✅ default is now 30
     "confirm_played_pick": False,
     # table confirmation
     "pending_action": None,  # "mark" or "unmark"
@@ -50,77 +50,38 @@ def reset_filters():
 # ---------------------------
 # Styling
 # ---------------------------
-heavy_on = bool(st.session_state.get("heavy_mode"))
-random_has_pick = st.session_state.get("random_pick_id") is not None
-
-# NOTE: This colors buttons by position in the first button row:
-#  - 1st button = Random -> green when a pick exists
-#  - 2nd button = Heavy  -> red when heavy mode is on
-random_css = (
-    """
-    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(1) button {
-        background: #2a9d8f !important;
-        color: white !important;
-        border: 1px solid rgba(0,0,0,0.08) !important;
-    }
-    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(1) button:hover {
-        filter: brightness(0.95);
-    }
-    """
-    if random_has_pick
-    else ""
-)
-
-heavy_css = (
-    """
-    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(2) button {
-        background: #d62828 !important;
-        color: white !important;
-        border: 1px solid rgba(0,0,0,0.08) !important;
-    }
-    div[data-testid="column"]:first-of-type div[data-testid="stHorizontalBlock"] div[data-testid="stButton"]:nth-of-type(2) button:hover {
-        filter: brightness(0.95);
-    }
-    """
-    if heavy_on
-    else ""
-)
-
 st.markdown(
-    f"""
+    """
     <style>
-      .block-container {{ padding-top: 1.2rem; }}
-      h1 {{ margin-bottom: 0.2rem; }}
-      .subtitle {{ opacity: 0.85; margin-top: -0.4rem; margin-bottom: 1rem; }}
+      .block-container { padding-top: 1.2rem; }
+      h1 { margin-bottom: 0.2rem; }
+      .subtitle { opacity: 0.85; margin-top: -0.4rem; margin-bottom: 1rem; }
 
-      .card {{
+      .card {
         border: 1px solid rgba(0,0,0,0.08);
         border-radius: 14px;
         padding: 14px 16px;
         background: rgba(255,255,255,0.88);
         box-shadow: 0 1px 6px rgba(0,0,0,0.05);
         margin-bottom: 12px;
-      }}
+      }
 
-      .pick-title {{ font-size: 1.05rem; opacity: 0.8; margin-bottom: 4px; }}
-      .pick-name {{ font-size: 1.35rem; font-weight: 800; line-height: 1.15; }}
-      .pick-meta {{ margin-top: 8px; font-size: 0.95rem; opacity: 0.9; }}
+      .pick-title { font-size: 1.05rem; opacity: 0.8; margin-bottom: 4px; }
+      .pick-name { font-size: 1.35rem; font-weight: 800; line-height: 1.15; }
+      .pick-meta { margin-top: 8px; font-size: 0.95rem; opacity: 0.9; }
 
-      .mini {{
+      .mini {
         opacity: 0.85;
         font-size: 0.9rem;
         margin-top: 8px;
-      }}
+      }
 
-      .admin-box {{
+      .admin-box {
         opacity: 0.85;
         border-top: 1px dashed rgba(0,0,0,0.12);
         margin-top: 14px;
         padding-top: 10px;
-      }}
-
-      {random_css}
-      {heavy_css}
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -277,9 +238,10 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
 
 
 # ---------------------------
-# Header
+# Header (changes when Heavy Mode is on)
 # ---------------------------
-st.title("🎲 Board Game Picker")
+title = "🔥🎲 Board Game Picker" if st.session_state["heavy_mode"] else "🎲 Board Game Picker"
+st.title(title)
 st.markdown('<div class="subtitle">Pick player count → get the games that fit.</div>', unsafe_allow_html=True)
 
 left, right = st.columns([1, 3], gap="large")
@@ -290,18 +252,22 @@ left, right = st.columns([1, 3], gap="large")
 df = load_collection_from_csv()
 
 # ---------------------------
-# LEFT controls (Random pick card EXACTLY under buttons)
+# LEFT controls
 # ---------------------------
 with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
     st.slider("How many players tonight?", 1, 10, key="players")
-    st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
+
+    # Badge near slider
+    if st.session_state["heavy_mode"]:
+        st.markdown("🔥 **Heavy Mode Active**")
+
+    st.text_input("Search games", placeholder="Concordia.", key="search")  # ✅ placeholder updated
 
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("🎲 Random", use_container_width=True):
-            # Save previous pick to avoid repeat
             st.session_state["last_random_pick_id"] = st.session_state.get("random_pick_id")
             st.session_state["random_pick_id"] = None
             st.session_state["trigger_random"] = True
@@ -311,13 +277,20 @@ with left:
             st.session_state["heavy_mode"] = not st.session_state["heavy_mode"]
             st.session_state["random_pick_id"] = None
             st.session_state["confirm_played_pick"] = False
+            st.rerun()
     with c3:
         st.button("↺ Reset", use_container_width=True, on_click=reset_filters)
 
-    # placeholder EXACTLY here
+    # ✅ banner under buttons
+    if st.session_state["heavy_mode"]:
+        st.error(f"🔥 HEAVY MODE ACTIVE — Showing games with weight ≥ {HEAVY_CUTOFF:.2f}")
+    else:
+        st.success("Normal Mode — All weights allowed")
+
+    # Random pick placeholder directly under buttons/banner
     pick_slot = st.empty()
 
-    # moved up (before Hide Expansions) per your request
+    # moved above Hide Expansions per request
     st.markdown(
         f'<div class="mini">Heavy Mode filters to games with <b>Weight ≥ {HEAVY_CUTOFF:.2f}</b>.</div>',
         unsafe_allow_html=True,
@@ -358,7 +331,6 @@ with left:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-# If no collection.csv yet, stop after showing left panel
 if df.empty:
     st.stop()
 
@@ -393,7 +365,6 @@ else:
 
 filtered["days_ago"] = filtered["last_played"].apply(days_ago)
 
-# Round for display
 filtered["avgweight"] = pd.to_numeric(filtered["avgweight"], errors="coerce").round(2)
 filtered["baverage"] = pd.to_numeric(filtered["baverage"], errors="coerce").round(2)
 
@@ -401,15 +372,12 @@ filtered = filtered.reset_index(drop=True)
 
 # ---------------------------
 # Random pick selection
-#   - Never draw expansions
-#   - Avoid recently played (optional)
-#   - Prevent repeating last pick
 # ---------------------------
 if st.session_state["trigger_random"]:
     st.session_state["trigger_random"] = False
     pool = filtered.copy()
 
-    # Never allow expansions in Random (even if visible in table)
+    # ✅ Never allow expansions in Random
     if "itemtype" in pool.columns:
         pool = pool[pool["itemtype"].astype(str).str.lower() != "expansion"]
 
@@ -429,7 +397,7 @@ if st.session_state["trigger_random"]:
         st.session_state["random_pick_id"] = None
 
 # ---------------------------
-# Render Random pick card INTO placeholder under buttons
+# Random pick card
 # ---------------------------
 with pick_slot.container():
     if st.session_state["random_pick_id"] is not None and "objectid" in filtered.columns:
@@ -552,13 +520,16 @@ def show_pending_dialog():
 
 
 # ---------------------------
-# RIGHT panel: Table ONLY
+# RIGHT panel: Table ONLY + Heavy-mode header text
 # ---------------------------
 with right:
     table_df = filtered.copy()
 
-    extra = " (Heavy Mode)" if st.session_state["heavy_mode"] else ""
-    st.write(f"### {len(table_df)} games available for {players} players{extra}")
+    if st.session_state["heavy_mode"]:
+        st.write(f"### 🔥 {len(table_df)} Heavy Games Available for {players} players")
+    else:
+        st.write(f"### {len(table_df)} games available for {players} players")
+
     st.caption("Toggle ✅ Played Tonight (you’ll be asked to confirm). Uncheck to undo.")
 
     editor_df = pd.DataFrame(
