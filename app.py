@@ -214,7 +214,7 @@ def save_uploaded_collection_csv(uploaded_file) -> None:
 # ---------------------------
 DEFAULTS = {
     "players": 4,
-    "hide_expansions": True,
+    "hide_expansions": False,
     "heavy_mode": False,
     "search": "",
     "random_pick_id": None,
