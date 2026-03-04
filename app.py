@@ -277,7 +277,7 @@ with left:
     st.markdown('<div class="card">', unsafe_allow_html=True)
 
     st.slider("How many players tonight?", 1, 10, key="players")
-    st.text_input("Search games", placeholder="e.g., Gloomhaven…", key="search")
+    st.text_input("Search games", placeholder="e.g., Concordia…", key="search")
 
     c1, c2, c3 = st.columns(3)
     with c1:
