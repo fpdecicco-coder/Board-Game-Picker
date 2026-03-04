@@ -543,8 +543,15 @@ with right:
                 else f"{int(r['minplayers'])}+",
                 axis=1,
             ),
-            "Weight": table_df["avgweight"],
-            "BGG Score": table_df["baverage"],
+"Weight": table_df["avgweight"].apply(
+    lambda w: (
+        f"🟢 {w:.2f}" if pd.notna(w) and w < 2
+        else f"🟡 {w:.2f}" if pd.notna(w) and w < 3
+        else f"🟠 {w:.2f}" if pd.notna(w) and w < 3.75
+        else f"🔴 {w:.2f}" if pd.notna(w)
+        else ""
+    )
+),            "BGG Score": table_df["baverage"],
             "Last Played": table_df["last_played"].astype(str).replace({"<NA>": "", "nan": ""}),
             "Days Ago": table_df["days_ago"],
             # ✅ Use a REAL url column; LinkColumn will render it clickable
